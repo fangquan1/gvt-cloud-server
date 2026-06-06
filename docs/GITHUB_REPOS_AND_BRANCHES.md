@@ -11,8 +11,8 @@
 
 | 用途 | 目标仓库 | 本地仓库 | 默认开发分支 | 状态 |
 | --- | --- | --- | --- | --- |
-| 客户端 | `https://github.com/fangquan1/gvt-cloud-client` | `repos/gvt-cloud-client` | `gvt-cloud-client-mvp` | 已推送，首提交 `48ec412` |
-| 服务端 | `https://github.com/fangquan1/gvt-cloud-server` | `repos/gvt-cloud-server` | `gvt-cloud-server-mvp` | 已推送，首提交 `6927761` |
+| 客户端 | `https://github.com/fangquan1/gvt-cloud-client` | `repos/gvt-cloud-client` | `gvt-cloud-client-mvp` | 已推送，当前提交 `1e96dba0f038` |
+| 服务端 | `https://github.com/fangquan1/gvt-cloud-server` | `repos/gvt-cloud-server` | `gvt-cloud-server-mvp` | 已推送，当前提交 `898311750924` |
 
 后续所有产品代码应优先进入这两个仓库:
 
@@ -23,16 +23,26 @@
 
 | 组件 | 上游来源 | 目标 fork/镜像 | 当前项目分支 | 当前改动来源 | 说明 |
 | --- | --- | --- | --- | --- | --- |
-| QEMU | `https://github.com/qemu/qemu` | `https://github.com/fangquan1/qemu` | `gvt-cloud-gvt-stream-20260607` | `physical-output/remote-work/gvt-stream.c`, `physical-output/remote-work/meson.build`, `direct-stream/remote-current-gvt-stream.c` | 已推送，提交 `e1db96ae8f` |
-| SPICE server | `https://gitlab.freedesktop.org/spice/spice` | `https://github.com/fangquan1/spice` | `gvt-cloud-spice-h264-20260607` | `direct-stream/archive/spice-embedded-audio-stable-autosize-20260602-031504/server/spice-server-reds.cpp`, 早期 H.264/stream 调参记录 | 已推送可用源码改动，提交 `735427cb`；早期 H.264 调参仍需从远端源码补齐 |
+| QEMU | `https://github.com/qemu/qemu` | `https://github.com/fangquan1/qemu` | `gvt-cloud-gvt-stream-20260607` | 远端 `/usr/local/src/project/qemu` 当前 worktree | 已推送，当前提交 `4e364bdc51fc` |
+| SPICE server | `https://gitlab.freedesktop.org/spice/spice` | `https://github.com/fangquan1/spice` | `gvt-cloud-spice-h264-20260607` | 远端 `/usr/local/src/project/spice` 当前 worktree | 已推送，当前提交 `b3331bc14431` |
 | spice-gtk | `https://gitlab.freedesktop.org/spice/spice-gtk` | `https://github.com/fangquan1/spice-gtk` | `gvt-cloud-client-audio-input-20260607` | `third_party/spice-gtk-v0.37` | 已推送，基于 tag `v0.37` |
 | virt-viewer | `https://gitlab.com/virt-viewer/virt-viewer` | `https://github.com/fangquan1/virt-viewer` | `gvt-cloud-client-viewer-20260607` | `third_party/virt-viewer-v11.0` | 已推送，基于 tag `v11.0` |
-| Linux kernel | `https://github.com/gregkh/linux` | `https://github.com/fangquan1/linux` | `gvt-cloud-shadowfb-6.6.40-20260607` | `direct-stream/kernel/*`, `direct-stream/kernel/work/shadow_fb.c`, `direct-stream/kernel/work/shadow_fb.h` | 已推送，基于 `v6.6.40`，提交 `a15451d` |
+| Linux kernel | `https://github.com/gregkh/linux` | `https://github.com/fangquan1/linux` | `gvt-cloud-shadowfb-6.6.40-20260607` | 远端 `/usr/src/linux-6.6.40/drivers/gpu/drm/i915/gvt/shadow_fb.*` | 已推送，基于 `v6.6.40`，当前提交 `9632906a7487` |
 
 备注:
 
 - GStreamer 当前作为运行时依赖和 Windows runtime，不建议 fork，除非后续实际修改 GStreamer 插件。
 - 如果 GitHub 不能直接 fork GitLab 上游，应在 GitHub 新建同名 mirror 仓库，再添加上游 remote。
+
+## 2026-06-07 远端扫描与补提交记录
+
+- 已连接远端服务器并扫描 `/usr/local/src/project/qemu`、`/usr/local/src/project/spice`、`/usr/src/linux-6.6.40`、`/root/qemu_cmd`、`/root/qemu_cmd/multivm`。
+- QEMU fork 已同步远端当前 worktree 改动，包括 `ui/gvt-stream.c`、QEMU/SPICE 显示与音频相关补丁、`qapi` 配置和构建文件，提交 `4e364bdc51fc`。
+- SPICE fork 已同步远端 H.264/stream 调参和诊断改动，包括 `server/dcc.cpp`、`server/display-channel.cpp`、`server/gstreamer-encoder.c`、`server/video-stream.cpp`、`server/video-stream.h`，提交 `b3331bc14431`。
+- Linux fork 已同步远端当前 `shadow_fb.c/.h` 基线，当前 gvt-stream 路线下默认禁用旧 shadowfb BLT，提交 `9632906a7487`。
+- 服务端仓库已同步远端 `run-win10-gvt-stream-diag.sh` 和当前 kernel shadowfb 基线，提交 `898311750924`。
+- 服务端仓库中的 `scripts/multivm_remote.sh` 保留公开仓库脱敏版本；远端脚本会直接打印 Web 密码，公开仓库不保留这种输出。
+- 未提交远端 `.before-*` 备份文件、运行日志、进程快照、config/env 密码、VM 镜像、构建产物和私有调试输出。
 
 ## 需要提交到 QEMU 分支的当前改动
 
