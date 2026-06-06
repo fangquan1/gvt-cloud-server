@@ -277,6 +277,9 @@ start_one() {
     local qmp="$DIR/$name-qmp.sock"
     local mon="$DIR/$name-monitor.sock"
     local pidfile="$DIR/$name.pid"
+    local upper
+    local mode_var
+    local vm_mode
 
     if [ ! -e "/sys/bus/mdev/devices/$uuid" ]; then
         echo "missing mdev $uuid for $name" >&2
@@ -289,6 +292,9 @@ start_one() {
 
     setup_tap "$tap"
     rm -f "$qmp" "$mon"
+    upper=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')
+    mode_var="${upper}_MODE"
+    vm_mode="${!mode_var:-physical}"
 
     (
         export LD_LIBRARY_PATH=/usr/local/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
@@ -309,6 +315,30 @@ start_one() {
         export GVT_STREAM_CAPTURE_MAX=0
         export GVT_STREAM_IMPORT_TEST=0
         export GVT_STREAM_ENCODE_PATH=dmabuf
+        export GVT_STREAM_CAPTURE_MS=16
+        export GVT_STREAM_IDLE_CHANGED_PPM=3000
+        export GVT_STREAM_IDLE_PIXEL_DELTA=8
+        case "$vm_mode" in
+            realtime)
+                export GVT_STREAM_IDLE_CAPTURE_MS=16
+                export GVT_STREAM_IDLE_AFTER_MS=0
+                export GVT_STREAM_IDLE_PROBE_MS=0
+                ;;
+            power_save)
+                export GVT_STREAM_IDLE_CAPTURE_MS=66
+                export GVT_STREAM_IDLE_AFTER_MS=1500
+                export GVT_STREAM_IDLE_PROBE_MS=500
+                ;;
+            physical|"")
+                export GVT_STREAM_IDLE_CAPTURE_MS=16
+                export GVT_STREAM_IDLE_AFTER_MS=0
+                export GVT_STREAM_IDLE_PROBE_MS=0
+                ;;
+            *)
+                echo "unknown mode $vm_mode for $name" >&2
+                exit 2
+                ;;
+        esac
         unset GVT_STREAM_RTP_HOST GVT_STREAM_RTP_PORT GVT_AUDIO_RTP_HOST GVT_AUDIO_RTP_PORT
         unset GVT_STREAM_CAPTURE_DIR GVT_STREAM_ENCODE_FILE
 
@@ -337,7 +367,49 @@ start_one() {
         tail -160 "$log" >&2 || true
         exit 1
     fi
-    echo "$name started pid=$(cat "$pidfile") disk=$disk spice=$spice_port input=$input_port kms=${kms_connector:-none}"
+    echo "$name started pid=$(cat "$pidfile") disk=$disk spice=$spice_port input=$input_port mode=$vm_mode kms=${kms_connector:-none}"
+}
+
+set_vm_mode() {
+    local name=${1:-}
+    local mode=${2:-}
+
+    case "$name" in
+        vm1|vm2) ;;
+        *)
+            echo "set-mode requires vm1 or vm2" >&2
+            exit 2
+            ;;
+    esac
+    case "$mode" in
+        realtime|power_save|physical) ;;
+        *)
+            echo "set-mode requires realtime, power_save or physical" >&2
+            exit 2
+            ;;
+    esac
+    load_config
+    python3 - "$CONFIG" "$name" "$mode" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+key = sys.argv[2].upper() + "_MODE"
+mode = sys.argv[3]
+lines = path.read_text().splitlines() if path.exists() else []
+out = []
+seen = False
+for line in lines:
+    if line.startswith(key + "="):
+        out.append(f"{key}={mode}")
+        seen = True
+    else:
+        out.append(line)
+if not seen:
+    out.append(f"{key}={mode}")
+path.write_text("\n".join(out) + "\n")
+PY
+    echo "$name mode=$mode"
 }
 
 start_all() {
@@ -356,6 +428,80 @@ start_all() {
     start_one vm1 "$VM1_UUID" "$DIR/win10-vm1.qcow2" tap-win10a 52:54:00:10:01:88 5900 5905 ""
     start_one vm2 "$VM2_UUID" "$DIR/win10-vm2.qcow2" tap-win10b 52:54:00:10:02:88 5901 5906 ""
     start_web
+}
+
+start_vm() {
+    local name=${1:-}
+    load_config
+    create_overlays
+    case "$name" in
+        vm1)
+            start_outputd "$(detect_connector)"
+            start_one vm1 "$VM1_UUID" "$DIR/win10-vm1.qcow2" tap-win10a 52:54:00:10:01:88 5900 5905 ""
+            ;;
+        vm2)
+            start_outputd "$(detect_connector)"
+            start_one vm2 "$VM2_UUID" "$DIR/win10-vm2.qcow2" tap-win10b 52:54:00:10:02:88 5901 5906 ""
+            ;;
+        *)
+            echo "start-vm requires vm1 or vm2" >&2
+            exit 2
+            ;;
+    esac
+}
+
+stop_vm() {
+    local name=${1:-}
+    case "$name" in
+        vm1|vm2)
+            stop_one "$name"
+            ;;
+        *)
+            echo "stop-vm requires vm1 or vm2" >&2
+            exit 2
+            ;;
+    esac
+}
+
+restart_vm() {
+    local name=${1:-}
+    stop_vm "$name"
+    start_vm "$name"
+}
+
+select_state() {
+    local key=$1
+    local source=${2:-}
+
+    case "$source" in
+        vm1|vm2) ;;
+        *)
+            echo "$key requires vm1 or vm2" >&2
+            exit 2
+            ;;
+    esac
+    load_config
+    python3 - "$CONFIG" "$key" "$source" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+key = sys.argv[2].upper().replace("-", "_")
+source = sys.argv[3]
+lines = path.read_text().splitlines() if path.exists() else []
+out = []
+seen = False
+for line in lines:
+    if line.startswith(key + "="):
+        out.append(f"{key}={source}")
+        seen = True
+    else:
+        out.append(line)
+if not seen:
+    out.append(f"{key}={source}")
+path.write_text("\n".join(out) + "\n")
+PY
+    echo "$key=$source"
 }
 
 select_source() {
@@ -434,6 +580,26 @@ case "${1:-status}" in
         select_source "${2:-}"
         status_all
         ;;
+    start-vm)
+        start_vm "${2:-}"
+        status_all
+        ;;
+    stop-vm)
+        stop_vm "${2:-}"
+        ;;
+    restart-vm)
+        restart_vm "${2:-}"
+        status_all
+        ;;
+    set-mode)
+        set_vm_mode "${2:-}" "${3:-}"
+        ;;
+    input-select)
+        select_state input_source "${2:-}"
+        ;;
+    audio-select)
+        select_state audio_source "${2:-}"
+        ;;
     web-start)
         start_web
         status_all
@@ -460,7 +626,7 @@ case "${1:-status}" in
         status_all
         ;;
     *)
-        echo "usage: $0 {setup|start|stop|status|select|outputd-restart|web-start|web-stop|web-status}" >&2
+        echo "usage: $0 {setup|start|stop|status|select|start-vm|stop-vm|restart-vm|set-mode|input-select|audio-select|outputd-restart|web-start|web-stop|web-status}" >&2
         exit 2
         ;;
 esac
