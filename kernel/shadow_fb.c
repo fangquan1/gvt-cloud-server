@@ -584,11 +584,14 @@ void intel_vgpu_shadow_fb_init(struct intel_vgpu *vgpu)
 
 	memset(shadow, 0, sizeof(*shadow));
 	mutex_init(&shadow->lock);
-	shadow->enabled = vgpu->gvt->gt->i915->params.enable_gvt_shadowfb;
-
-	if (shadow->enabled)
-		pr_info("gvt: vgpu%d: shadow_fb enabled - tracking primary plane\n",
-			vgpu->id);
+	/*
+	 * The native gvt-stream display backend consumes VFIO display dmabuf
+	 * directly.  Keeping the old shadow framebuffer path enabled adds a
+	 * full-frame BLT on every primary update and can destabilize Windows
+	 * GVT-g video playback, so keep it off for this route even if the
+	 * boot-time i915.enable_gvt_shadowfb parameter is still present.
+	 */
+	shadow->enabled = false;
 }
 
 void intel_vgpu_shadow_fb_cleanup(struct intel_vgpu *vgpu)
@@ -672,7 +675,8 @@ void intel_vgpu_shadow_fb_note_plane(struct intel_vgpu *vgpu,
 		shadow->blit_pending = false;
 		shadow->primary_update_count++;
 		intel_vgpu_shadow_fb_alloc_locked(vgpu, info);
-		pr_info("gvt: vgpu%d: shadow_fb primary %ux%u stride=%u offset=%u,%u format=0x%x tiling=0x%llx size=%u\n",
+		drm_dbg(&vgpu->gvt->gt->i915->drm,
+			"gvt: vgpu%d: shadow_fb primary %ux%u stride=%u offset=%u,%u format=0x%x tiling=0x%llx size=%u\n",
 			vgpu->id, shadow->width, shadow->height,
 			shadow->stride, shadow->source_x_offset,
 			shadow->source_y_offset, shadow->drm_format,
@@ -838,10 +842,7 @@ out_finish:
 out_unlock:
 	mutex_unlock(&shadow->lock);
 
-	if (ret)
-		pr_err("gvt: vgpu%d: shadow_fb update failed ret=%d\n",
-		       vgpu->id, ret);
-	else
+	if (!ret)
 		gvt_dbg_dpy("vgpu%d: shadow_fb update successful (%llu ns)\n",
 			    vgpu->id, shadow->last_blit_ns);
 
