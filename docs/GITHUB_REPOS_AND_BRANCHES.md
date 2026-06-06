@@ -11,8 +11,8 @@
 
 | 用途 | 目标仓库 | 本地仓库 | 默认开发分支 | 状态 |
 | --- | --- | --- | --- | --- |
-| 客户端 | `https://github.com/fangquan1/gvt-cloud-client` | `repos/gvt-cloud-client` | `gvt-cloud-client-mvp` | 已推送，当前提交 `1e96dba0f038` |
-| 服务端 | `https://github.com/fangquan1/gvt-cloud-server` | `repos/gvt-cloud-server` | `gvt-cloud-server-mvp` | 已推送，当前提交 `898311750924` |
+| 客户端 | `https://github.com/fangquan1/gvt-cloud-client` | `repos/gvt-cloud-client` | `gvt-cloud-client-mvp` | 已推送，当前分支 HEAD 以 GitHub 为准 |
+| 服务端 | `https://github.com/fangquan1/gvt-cloud-server` | `repos/gvt-cloud-server` | `gvt-cloud-server-mvp` | 已推送，当前分支 HEAD 以 GitHub 为准 |
 
 后续所有产品代码应优先进入这两个仓库:
 
