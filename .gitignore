@@ -1,0 +1,17 @@
+*.o
+*.so
+*.exe
+*.log
+*.tmp
+*.qcow2
+*.iso
+*.img
+*.env
+*.env.local
+__pycache__/
+.venv/
+build/
+dist/
+secrets/
+runtime/
+qemu-build/

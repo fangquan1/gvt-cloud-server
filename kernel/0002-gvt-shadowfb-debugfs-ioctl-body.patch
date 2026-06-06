@@ -1,0 +1,178 @@
+--- a/drivers/gpu/drm/i915/gvt/shadow_fb.c
++++ b/drivers/gpu/drm/i915/gvt/shadow_fb.c
+@@ -30,6 +30,43 @@
+ 
+ #define SHADOW_FB_PAGE_CACHE_ENTRIES 512
+ #define GEN8_DECODE_PTE(pte) ((pte) & GENMASK_ULL(63, 12))
++#define GVT_SHADOWFB_IOC_MAGIC 'G'
++
++struct gvt_shadowfb_info {
++	__u32 version;
++	__u32 flags;
++	__u32 width;
++	__u32 height;
++	__u32 stride;
++	__u32 fourcc;
++	__u64 modifier;
++	__u64 size;
++	__u64 frame_id;
++	__u64 last_blit_ns;
++	__u64 last_frame_ns;
++};
++
++struct gvt_shadowfb_export {
++	__u32 flags;
++	__s32 fd;
++};
++
++struct gvt_shadowfb_blit {
++	__u32 flags;
++	__u32 timeout_ms;
++	__u64 frame_id;
++};
++
++#define GVT_SHADOWFB_IOC_GET_INFO \
++	_IOR(GVT_SHADOWFB_IOC_MAGIC, 0x01, struct gvt_shadowfb_info)
++
++#define GVT_SHADOWFB_IOC_EXPORT_DMABUF \
++	_IOWR(GVT_SHADOWFB_IOC_MAGIC, 0x02, struct gvt_shadowfb_export)
++
++#define GVT_SHADOWFB_IOC_TRIGGER_BLIT \
++	_IOWR(GVT_SHADOWFB_IOC_MAGIC, 0x03, struct gvt_shadowfb_blit)
+ 
+ struct intel_vgpu_shadow_fb_source_info {
+ 	struct intel_vgpu *vgpu;
+@@ -855,12 +892,115 @@ static int intel_vgpu_shadow_fb_open(struct inode *inode, struct file *file)
+ {
+ 	return single_open(file, intel_vgpu_shadow_fb_show, inode->i_private);
+ }
+ 
++static int intel_vgpu_shadow_fb_copy_info_to_user(struct intel_vgpu *vgpu,
++						  void __user *uarg)
++{
++	struct intel_vgpu_shadow_fb *shadow = &vgpu->shadow_fb;
++	struct gvt_shadowfb_info info = { .version = 1 };
++
++	mutex_lock(&shadow->lock);
++	if (!shadow->enabled || !shadow->allocated || !shadow->obj) {
++		mutex_unlock(&shadow->lock);
++		return -ENODEV;
++	}
++
++	info.width = shadow->width;
++	info.height = shadow->height;
++	info.stride = shadow->linear_stride;
++	info.fourcc = shadow->drm_format;
++	info.modifier = DRM_FORMAT_MOD_LINEAR;
++	info.size = shadow->shadow_size;
++	info.frame_id = shadow->blit_count;
++	info.last_blit_ns = shadow->last_blit_ns;
++	mutex_unlock(&shadow->lock);
++
++	if (copy_to_user(uarg, &info, sizeof(info)))
++		return -EFAULT;
++
++	return 0;
++}
++
++static int intel_vgpu_shadow_fb_export_fd(struct intel_vgpu *vgpu,
++					  void __user *uarg)
++{
++	struct gvt_shadowfb_export export = { .fd = -1 };
++	struct drm_i915_gem_object *obj;
++	struct dma_buf *dmabuf;
++	int fd;
++	int ret;
++
++	if (uarg && copy_from_user(&export, uarg, sizeof(export)))
++		return -EFAULT;
++
++	ret = intel_vgpu_shadow_fb_update(vgpu);
++	if (ret)
++		return ret;
++
++	obj = intel_vgpu_shadow_fb_get_object(vgpu);
++	if (!obj)
++		return -ENODEV;
++
++	dmabuf = i915_gem_prime_export(&obj->base, DRM_CLOEXEC | DRM_RDWR);
++	if (IS_ERR(dmabuf)) {
++		ret = PTR_ERR(dmabuf);
++		goto out_put_obj;
++	}
++
++	fd = get_unused_fd_flags(DRM_CLOEXEC | DRM_RDWR);
++	if (fd < 0) {
++		ret = fd;
++		goto out_put_dmabuf;
++	}
++
++	export.fd = fd;
++	if (uarg && copy_to_user(uarg, &export, sizeof(export))) {
++		put_unused_fd(fd);
++		ret = -EFAULT;
++		goto out_put_dmabuf;
++	}
++
++	fd_install(fd, dmabuf->file);
++	i915_gem_object_put(obj);
++	return fd;
++
++out_put_dmabuf:
++	dma_buf_put(dmabuf);
++out_put_obj:
++	i915_gem_object_put(obj);
++	return ret;
++}
++
++static int intel_vgpu_shadow_fb_trigger_blit(struct intel_vgpu *vgpu,
++					     void __user *uarg)
++{
++	struct gvt_shadowfb_blit blit = {};
++	int ret;
++
++	if (uarg && copy_from_user(&blit, uarg, sizeof(blit)))
++		return -EFAULT;
++
++	ret = intel_vgpu_shadow_fb_update(vgpu);
++	if (ret)
++		return ret;
++
++	blit.frame_id = vgpu->shadow_fb.blit_count;
++	if (uarg && copy_to_user(uarg, &blit, sizeof(blit)))
++		return -EFAULT;
++
++	return 0;
++}
++
++static long intel_vgpu_shadow_fb_ioctl(struct file *file, unsigned int cmd,
++				       unsigned long arg)
++{
++	struct seq_file *seq = file->private_data;
++	struct intel_vgpu *vgpu = seq ? seq->private : NULL;
++	void __user *uarg = (void __user *)arg;
++
++	if (!vgpu)
++		return -ENODEV;
++
++	switch (cmd) {
++	case GVT_SHADOWFB_IOC_GET_INFO:
++		return intel_vgpu_shadow_fb_copy_info_to_user(vgpu, uarg);
++	case GVT_SHADOWFB_IOC_EXPORT_DMABUF:
++		return intel_vgpu_shadow_fb_export_fd(vgpu, uarg);
++	case GVT_SHADOWFB_IOC_TRIGGER_BLIT:
++		return intel_vgpu_shadow_fb_trigger_blit(vgpu, uarg);
++	default:
++		return -ENOTTY;
++	}
++}
++
+ static const struct file_operations intel_vgpu_shadow_fb_fops = {
+ 	.owner = THIS_MODULE,
+ 	.open = intel_vgpu_shadow_fb_open,
+ 	.read = seq_read,
++	.unlocked_ioctl = intel_vgpu_shadow_fb_ioctl,
++	.compat_ioctl = intel_vgpu_shadow_fb_ioctl,
+ 	.llseek = seq_lseek,
+ 	.release = single_release,
+ };
