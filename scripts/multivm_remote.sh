@@ -3,6 +3,7 @@ set -euo pipefail
 
 DIR=/root/qemu_cmd/multivm
 CONFIG="$DIR/config.env"
+STATE=/run/gvt-cloud-server/state.json
 OUTPUTD_SRC="$DIR/gvt-outputd.c"
 OUTPUTD_BIN="$DIR/gvt-outputd"
 OUTPUTD_SOCK=/run/gvt-outputd.sock
@@ -140,20 +141,124 @@ qemu_pids_for_vm() {
         }'
 }
 
-vm_uuid() {
-    case "$1" in
-        vm1) printf '%s\n' "$VM1_UUID" ;;
-        vm2) printf '%s\n' "$VM2_UUID" ;;
-        *) return 1 ;;
+load_vm_meta() {
+    local name=$1
+    load_config
+    python3 - "$STATE" "$DIR" "$name" <<'PY'
+import json
+import os
+import pathlib
+import shlex
+import sys
+
+state_path = pathlib.Path(sys.argv[1])
+root = pathlib.Path(sys.argv[2])
+name = sys.argv[3]
+state = {}
+if state_path.exists():
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        state = {}
+data = {}
+if isinstance(state.get("desktops"), dict):
+    raw = state["desktops"].get(name)
+    if isinstance(raw, dict):
+        data = raw
+upper = name.upper().replace("-", "_")
+defaults = {
+    "vm1": {
+        "uuid": os.environ.get("VM1_UUID", ""),
+        "profile": os.environ.get("VM1_PROFILE", os.environ.get("MDEV_TYPE", "i915-GVTg_V5_8")),
+        "mode": os.environ.get("VM1_MODE", "physical"),
+        "vcpus": os.environ.get("VM1_VCPUS", "4"),
+        "memory_mib": os.environ.get("VM1_MEMORY_MIB", "4096"),
+        "disk": str(root / "win10-vm1.qcow2"),
+        "tap": "tap-win10a",
+        "mac": "52:54:00:10:01:88",
+        "spice_port": "5900",
+        "input_port": "5905",
+        "video_port": "5004",
+        "iso": os.environ.get("VM1_INSTALL_ISO", ""),
+    },
+    "vm2": {
+        "uuid": os.environ.get("VM2_UUID", ""),
+        "profile": os.environ.get("VM2_PROFILE", os.environ.get("MDEV_TYPE", "i915-GVTg_V5_8")),
+        "mode": os.environ.get("VM2_MODE", "physical"),
+        "vcpus": os.environ.get("VM2_VCPUS", "4"),
+        "memory_mib": os.environ.get("VM2_MEMORY_MIB", "4096"),
+        "disk": str(root / "win10-vm2.qcow2"),
+        "tap": "tap-win10b",
+        "mac": "52:54:00:10:02:88",
+        "spice_port": "5901",
+        "input_port": "5906",
+        "video_port": "5008",
+        "iso": os.environ.get("VM2_INSTALL_ISO", ""),
+    },
+}
+meta = defaults.get(name, {})
+if data:
+    meta = {
+        "uuid": str(data.get("uuid") or meta.get("uuid") or ""),
+        "profile": str(data.get("gvt_profile") or meta.get("profile") or "i915-GVTg_V5_8"),
+        "mode": str((state.get("modes") or {}).get(name) or data.get("mode") or meta.get("mode") or "realtime"),
+        "vcpus": str((state.get("resources") or {}).get(name, {}).get("vcpus") or data.get("vcpus") or meta.get("vcpus") or "4"),
+        "memory_mib": str((state.get("resources") or {}).get(name, {}).get("memory_mib") or data.get("memory_mib") or meta.get("memory_mib") or "4096"),
+        "disk": str(data.get("overlay") or meta.get("disk") or root / "disks" / f"{name}.qcow2"),
+        "tap": str(data.get("tap") or meta.get("tap") or f"tap-{name}")[:15],
+        "mac": str(data.get("mac") or meta.get("mac") or "52:54:00:10:99:88"),
+        "spice_port": str(data.get("spice_port") or meta.get("spice_port") or "5900"),
+        "input_port": str(data.get("input_port") or meta.get("input_port") or "5905"),
+        "video_port": str(data.get("video_port") or meta.get("video_port") or "5004"),
+        "iso": str(data.get("install_iso") or (state.get("iso") or {}).get(name) or meta.get("iso") or ""),
+    }
+if not meta:
+    raise SystemExit(f"unknown desktop {name}")
+for key, value in {
+    "VM_UUID": meta.get("uuid", ""),
+    "VM_PROFILE": meta.get("profile", "i915-GVTg_V5_8"),
+    "VM_MODE": meta.get("mode", "realtime"),
+    "VM_VCPUS": meta.get("vcpus", "4"),
+    "VM_MEMORY_MIB": meta.get("memory_mib", "4096"),
+    "VM_DISK": meta.get("disk", ""),
+    "VM_TAP": meta.get("tap", f"tap-{name}")[:15],
+    "VM_MAC": meta.get("mac", "52:54:00:10:99:88"),
+    "VM_SPICE_PORT": meta.get("spice_port", "5900"),
+    "VM_INPUT_PORT": meta.get("input_port", "5905"),
+    "VM_VIDEO_PORT": meta.get("video_port", "5004"),
+    "VM_INSTALL_ISO": meta.get("iso", ""),
+}.items():
+    print(f"{key}={shlex.quote(str(value))}")
+PY
+}
+
+vm_exists() {
+    local name=$1
+    case "$name" in
+        vm1|vm2) return 0 ;;
     esac
+    python3 - "$STATE" "$name" <<'PY'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+name = sys.argv[2]
+try:
+    data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+except Exception:
+    data = {}
+raise SystemExit(0 if isinstance(data.get("desktops"), dict) and name in data["desktops"] else 1)
+PY
+}
+
+vm_uuid() {
+    eval "$(load_vm_meta "$1")"
+    printf '%s\n' "$VM_UUID"
 }
 
 vm_profile() {
-    case "$1" in
-        vm1) printf '%s\n' "${VM1_PROFILE:-$MDEV_TYPE}" ;;
-        vm2) printf '%s\n' "${VM2_PROFILE:-$MDEV_TYPE}" ;;
-        *) return 1 ;;
-    esac
+    eval "$(load_vm_meta "$1")"
+    printf '%s\n' "$VM_PROFILE"
 }
 
 current_mdev_type() {
@@ -388,6 +493,7 @@ start_one() {
     local video_port=$8
     local client_host=$9
     local kms_connector=${10:-}
+    local install_iso=${11:-}
     local log="$DIR/$name.log"
     local qmp="$DIR/$name-qmp.sock"
     local mon="$DIR/$name-monitor.sock"
@@ -409,11 +515,11 @@ start_one() {
     rm -f "$qmp" "$mon"
     upper=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')
     mode_var="${upper}_MODE"
-    vm_mode="${!mode_var:-physical}"
+    vm_mode="${!mode_var:-${VM_MODE:-physical}}"
     vcpus_var="${upper}_VCPUS"
     memory_var="${upper}_MEMORY_MIB"
-    vcpus="${!vcpus_var:-4}"
-    memory_mib="${!memory_var:-4096}"
+    vcpus="${!vcpus_var:-${VM_VCPUS:-4}}"
+    memory_mib="${!memory_var:-${VM_MEMORY_MIB:-4096}}"
     ensure_mdev_for_vm "$name"
 
     (
@@ -489,9 +595,13 @@ start_one() {
         fi
         unset GVT_AUDIO_RTP_HOST GVT_AUDIO_RTP_PORT
         unset GVT_STREAM_CAPTURE_DIR GVT_STREAM_ENCODE_FILE
+        local boot_args=(-boot order=c)
+        if [ -n "$install_iso" ]; then
+            boot_args=(-boot order=d -cdrom "$install_iso")
+        fi
 
         nohup "$QEMU_BIN" \
-            --nodefaults -enable-kvm -cpu host -m "$memory_mib" -smp "$vcpus" -boot order=c \
+            --nodefaults -enable-kvm -cpu host -m "$memory_mib" -smp "$vcpus" "${boot_args[@]}" \
             -name "$name" \
             -display gvt-stream,rendernode=/dev/dri/renderD128,codec=h264 \
             -spice port="$spice_port",addr=0.0.0.0,disable-ticketing=on,agent-mouse=off,playback-compression=off,streaming-video=off,image-compression=off,disable-copy-paste=on,disable-agent-file-xfer=on,display=none \
@@ -522,13 +632,10 @@ set_vm_mode() {
     local name=${1:-}
     local mode=${2:-}
 
-    case "$name" in
-        vm1|vm2) ;;
-        *)
-            echo "set-mode requires vm1 or vm2" >&2
-            exit 2
-            ;;
-    esac
+    if ! vm_exists "$name"; then
+        echo "unknown desktop $name" >&2
+        exit 2
+    fi
     case "$mode" in
         realtime|realtime30|power_save|physical) ;;
         *)
@@ -537,6 +644,27 @@ set_vm_mode() {
             ;;
     esac
     load_config
+    case "$name" in
+        vm1|vm2) ;;
+        *)
+            python3 - "$STATE" "$name" "$mode" <<'PY'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+name = sys.argv[2]
+mode = sys.argv[3]
+data = json.loads(path.read_text(encoding="utf-8", errors="replace")) if path.exists() else {}
+data.setdefault("modes", {})[name] = mode
+if isinstance(data.get("desktops"), dict) and isinstance(data["desktops"].get(name), dict):
+    data["desktops"][name]["mode"] = mode
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+PY
+            echo "$name mode=$mode"
+            return
+            ;;
+    esac
     python3 - "$CONFIG" "$name" "$mode" <<'PY'
 import pathlib
 import sys
@@ -564,13 +692,10 @@ set_vm_profile() {
     local name=${1:-}
     local profile=${2:-}
 
-    case "$name" in
-        vm1|vm2) ;;
-        *)
-            echo "set-profile requires vm1 or vm2" >&2
-            exit 2
-            ;;
-    esac
+    if ! vm_exists "$name"; then
+        echo "unknown desktop $name" >&2
+        exit 2
+    fi
     if [ ! -d "$MDEV_PARENT/mdev_supported_types/$profile" ]; then
         echo "unknown GVT-g profile $profile" >&2
         exit 2
@@ -580,6 +705,27 @@ set_vm_profile() {
         echo "$name is running; stop it before changing GVT-g profile" >&2
         exit 4
     fi
+    case "$name" in
+        vm1|vm2) ;;
+        *)
+            python3 - "$STATE" "$name" "$profile" <<'PY'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+name = sys.argv[2]
+profile = sys.argv[3]
+data = json.loads(path.read_text(encoding="utf-8", errors="replace")) if path.exists() else {}
+data.setdefault("profiles", {})[name] = profile
+if isinstance(data.get("desktops"), dict) and isinstance(data["desktops"].get(name), dict):
+    data["desktops"][name]["gvt_profile"] = profile
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+PY
+            echo "$name profile=$profile"
+            return
+            ;;
+    esac
     python3 - "$CONFIG" "$name" "$profile" <<'PY'
 import pathlib
 import sys
@@ -608,13 +754,10 @@ set_vm_resources() {
     local vcpus=${2:-}
     local memory_mib=${3:-}
 
-    case "$name" in
-        vm1|vm2) ;;
-        *)
-            echo "set-resources requires vm1 or vm2" >&2
-            exit 2
-            ;;
-    esac
+    if ! vm_exists "$name"; then
+        echo "unknown desktop $name" >&2
+        exit 2
+    fi
     case "$vcpus" in
         ''|*[!0-9]*)
             echo "vcpus must be an integer" >&2
@@ -640,6 +783,29 @@ set_vm_resources() {
         exit 2
     fi
     load_config
+    case "$name" in
+        vm1|vm2) ;;
+        *)
+            python3 - "$STATE" "$name" "$vcpus" "$memory_mib" <<'PY'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+name = sys.argv[2]
+vcpus = int(sys.argv[3])
+memory_mib = int(sys.argv[4])
+data = json.loads(path.read_text(encoding="utf-8", errors="replace")) if path.exists() else {}
+data.setdefault("resources", {})[name] = {"vcpus": vcpus, "memory_mib": memory_mib}
+if isinstance(data.get("desktops"), dict) and isinstance(data["desktops"].get(name), dict):
+    data["desktops"][name]["vcpus"] = vcpus
+    data["desktops"][name]["memory_mib"] = memory_mib
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+PY
+            echo "$name vcpus=$vcpus memory_mib=$memory_mib"
+            return
+            ;;
+    esac
     python3 - "$CONFIG" "$name" "$vcpus" "$memory_mib" <<'PY'
 import pathlib
 import sys
@@ -700,42 +866,29 @@ start_vm() {
     local connector=""
     local vm_mode=""
     load_config
-    create_overlays
+    if ! vm_exists "$name"; then
+        echo "unknown desktop $name" >&2
+        exit 2
+    fi
     case "$name" in
-        vm1)
-            vm_mode="${VM1_MODE:-physical}"
-            if [ "$vm_mode" = "physical" ]; then
-                connector=$(detect_connector)
-                start_outputd "$connector"
-            fi
-            start_one vm1 "$VM1_UUID" "$DIR/win10-vm1.qcow2" tap-win10a 52:54:00:10:01:88 5900 5905 5004 "$client_host" "$connector"
-            ;;
-        vm2)
-            vm_mode="${VM2_MODE:-physical}"
-            if [ "$vm_mode" = "physical" ]; then
-                connector=$(detect_connector)
-                start_outputd "$connector"
-            fi
-            start_one vm2 "$VM2_UUID" "$DIR/win10-vm2.qcow2" tap-win10b 52:54:00:10:02:88 5901 5906 5008 "$client_host" "$connector"
-            ;;
-        *)
-            echo "start-vm requires vm1 or vm2" >&2
-            exit 2
-            ;;
+        vm1|vm2) create_overlays ;;
     esac
+    eval "$(load_vm_meta "$name")"
+    vm_mode="$VM_MODE"
+    if [ "$vm_mode" = "physical" ]; then
+        connector=$(detect_connector)
+        start_outputd "$connector"
+    fi
+    start_one "$name" "$VM_UUID" "$VM_DISK" "$VM_TAP" "$VM_MAC" "$VM_SPICE_PORT" "$VM_INPUT_PORT" "$VM_VIDEO_PORT" "$client_host" "$connector" "$VM_INSTALL_ISO"
 }
 
 stop_vm() {
     local name=${1:-}
-    case "$name" in
-        vm1|vm2)
-            stop_one "$name"
-            ;;
-        *)
-            echo "stop-vm requires vm1 or vm2" >&2
-            exit 2
-            ;;
-    esac
+    if ! vm_exists "$name"; then
+        echo "unknown desktop $name" >&2
+        exit 2
+    fi
+    stop_one "$name"
 }
 
 restart_vm() {
@@ -749,13 +902,10 @@ select_state() {
     local key=$1
     local source=${2:-}
 
-    case "$source" in
-        vm1|vm2) ;;
-        *)
-            echo "$key requires vm1 or vm2" >&2
-            exit 2
-            ;;
-    esac
+    if ! vm_exists "$source"; then
+        echo "$key unknown desktop $source" >&2
+        exit 2
+    fi
     load_config
     python3 - "$CONFIG" "$key" "$source" <<'PY'
 import pathlib

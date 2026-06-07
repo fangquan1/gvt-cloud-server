@@ -7,6 +7,7 @@ import re
 import shlex
 import secrets
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -80,7 +81,7 @@ class GvtCloudService:
         }
 
     def desktops(self) -> list[dict[str, Any]]:
-        return [self.desktop(item.id) for item in self.config.desktops]
+        return [self.desktop(item.id) for item in self._all_desktop_configs()]
 
     def gvt_profiles(self) -> list[dict[str, Any]]:
         return self.runtime.gvt_profiles()
@@ -106,6 +107,8 @@ class GvtCloudService:
             },
             "resolution": self._profile_resolution(profile) or desktop.resolution,
             "overlay": desktop.overlay,
+            "install_iso": self._desktop_iso(desktop),
+            "disk_size_gib": desktop.disk_size_gib,
             "tap": desktop.tap,
             "mac": desktop.mac,
             "gvt_stream": self._stream_summary(desktop) if running else self._empty_stream_summary(),
@@ -114,6 +117,60 @@ class GvtCloudService:
 
     def setup(self) -> dict[str, Any]:
         return self._run("setup")
+
+    def create_desktop(self, payload: dict[str, Any]) -> dict[str, Any]:
+        name = str(payload.get("name") or "Windows Desktop").strip() or "Windows Desktop"
+        desktop_id = self._unique_desktop_id(str(payload.get("id") or name))
+        mode = str(payload.get("mode") or "realtime")
+        if mode not in VALID_MODES:
+            raise ApiError(400, "invalid mode")
+        profile = str(payload.get("gvt_profile") or payload.get("profile") or "i915-GVTg_V5_8")
+        self._validate_profile(profile)
+        vcpus = self._as_int(payload.get("vcpus"), 4)
+        memory_mib = self._as_int(payload.get("memory_mib"), 4096)
+        self._validate_resources(vcpus, memory_mib)
+        disk_size_gib = self._as_int(payload.get("disk_size_gib"), 80)
+        if disk_size_gib < 20 or disk_size_gib > 1024:
+            raise ApiError(400, "disk_size_gib must be between 20 and 1024")
+
+        qcow2_path = str(payload.get("qcow2_path") or "").strip()
+        install_iso = str(payload.get("install_iso") or payload.get("iso_path") or "").strip()
+        if not qcow2_path:
+            qcow2_path = str(Path(self.config.runtime.root_dir) / "disks" / f"{desktop_id}.qcow2")
+            result = self.runtime.create_qcow2(qcow2_path, disk_size_gib)
+            if not result.ok:
+                response = self._command_response(result)
+                raise ApiError(500, response.get("stderr") or response.get("stdout") or "failed to create qcow2")
+
+        ports = self._allocate_ports()
+        index = len(self._all_desktop_configs()) + 1
+        desktop_data = {
+            "id": desktop_id,
+            "name": name,
+            "spice_port": ports["spice"],
+            "input_port": ports["input"],
+            "video_port": ports["video"],
+            "audio_port": ports["spice"],
+            "vcpus": vcpus,
+            "memory_mib": memory_mib,
+            "resolution": self._profile_resolution(profile) or "1024x768",
+            "overlay": qcow2_path,
+            "pid_file": f"{self.config.runtime.root_dir}/{desktop_id}.pid",
+            "log_file": f"{self.config.runtime.root_dir}/{desktop_id}.log",
+            "mode": mode,
+            "gvt_profile": profile,
+            "tap": f"tap-{desktop_id}"[:15],
+            "mac": self._mac_for_index(index),
+            "install_iso": install_iso,
+            "disk_size_gib": disk_size_gib,
+            "uuid": str(uuid.uuid4()),
+        }
+        self._state.setdefault("desktops", {})[desktop_id] = desktop_data
+        self._set_mode_state(desktop_id, mode, save=False)
+        self._set_profile_state(desktop_id, profile, save=False)
+        self._set_resource_state(desktop_id, vcpus, memory_mib, save=False)
+        self._save_state()
+        return self.desktop(desktop_id)
 
     def start_desktop(self, desktop_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         desktop = self._desktop_config(desktop_id)
@@ -181,6 +238,19 @@ class GvtCloudService:
         result = self._run("desktop_resources", id=desktop.id, vcpus=vcpus, memory_mib=memory_mib)
         return self._with_command(self.desktop(desktop.id), result)
 
+    def set_desktop_iso(self, desktop_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        desktop = self._desktop_config(desktop_id)
+        if self.runtime.pid_status(desktop)[1]:
+            raise ApiError(409, "stop the desktop before changing ISO attachment")
+        iso_path = str(payload.get("iso_path") or payload.get("install_iso") or "").strip()
+        dynamic = self._state.setdefault("desktops", {}).get(desktop.id)
+        if isinstance(dynamic, dict):
+            dynamic["install_iso"] = iso_path
+        else:
+            self._state.setdefault("iso", {})[desktop.id] = iso_path
+        self._save_state()
+        return self.desktop(desktop.id)
+
     def select_output(self, source: str) -> dict[str, Any]:
         self._desktop_config(source)
         self._state["output_source"] = source
@@ -229,10 +299,41 @@ class GvtCloudService:
         return payload
 
     def _desktop_config(self, desktop_id: str) -> DesktopConfig:
-        for desktop in self.config.desktops:
+        for desktop in self._all_desktop_configs():
             if desktop.id == desktop_id:
                 return desktop
         raise ApiError(404, "desktop not found")
+
+    def _all_desktop_configs(self) -> list[DesktopConfig]:
+        desktops = list(self.config.desktops)
+        raw_desktops = self._state.get("desktops", {})
+        if isinstance(raw_desktops, dict):
+            for item in raw_desktops.values():
+                if isinstance(item, dict):
+                    desktops.append(self._desktop_from_state(item))
+        return desktops
+
+    def _desktop_from_state(self, data: dict[str, Any]) -> DesktopConfig:
+        return DesktopConfig(
+            id=str(data.get("id", "")),
+            name=str(data.get("name") or data.get("id") or "desktop"),
+            spice_port=self._as_int(data.get("spice_port"), 0),
+            input_port=self._as_int(data.get("input_port"), 0),
+            video_port=self._as_int(data.get("video_port"), 0),
+            audio_port=self._as_int(data.get("audio_port"), self._as_int(data.get("spice_port"), 0)),
+            vcpus=self._as_int(data.get("vcpus"), 4),
+            memory_mib=self._as_int(data.get("memory_mib"), 4096),
+            resolution=str(data.get("resolution") or "1024x768"),
+            overlay=str(data.get("overlay") or ""),
+            pid_file=str(data.get("pid_file") or f"{self.config.runtime.root_dir}/{data.get('id', 'desktop')}.pid"),
+            log_file=str(data.get("log_file") or f"{self.config.runtime.root_dir}/{data.get('id', 'desktop')}.log"),
+            mode=str(data.get("mode") or "realtime"),
+            gvt_profile=str(data.get("gvt_profile") or "i915-GVTg_V5_8"),
+            tap=str(data.get("tap") or f"tap-{data.get('id', 'desktop')}")[:15],
+            mac=str(data.get("mac") or "52:54:00:10:99:88"),
+            install_iso=str(data.get("install_iso") or ""),
+            disk_size_gib=self._as_int(data.get("disk_size_gib"), 80),
+        )
 
     def _load_state(self) -> dict[str, Any]:
         path = Path(self.config.runtime.state_file)
@@ -251,23 +352,32 @@ class GvtCloudService:
         tmp.write_text(json.dumps(self._state, indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(path)
 
-    def _set_mode_state(self, desktop_id: str, mode: str) -> None:
+    def _set_mode_state(self, desktop_id: str, mode: str, save: bool = True) -> None:
         modes = self._state.setdefault("modes", {})
         modes[desktop_id] = mode
-        self._save_state()
+        if save:
+            self._save_state()
 
-    def _set_profile_state(self, desktop_id: str, profile: str) -> None:
+    def _set_profile_state(self, desktop_id: str, profile: str, save: bool = True) -> None:
         profiles = self._state.setdefault("profiles", {})
         profiles[desktop_id] = profile
-        self._save_state()
+        if save:
+            self._save_state()
 
-    def _set_resource_state(self, desktop_id: str, vcpus: int, memory_mib: int) -> None:
+    def _set_resource_state(self, desktop_id: str, vcpus: int, memory_mib: int, save: bool = True) -> None:
         resources = self._state.setdefault("resources", {})
         resources[desktop_id] = {"vcpus": vcpus, "memory_mib": memory_mib}
-        self._save_state()
+        if save:
+            self._save_state()
 
     def _desktop_profile(self, desktop: DesktopConfig) -> str:
         return str(self._state.get("profiles", {}).get(desktop.id, desktop.gvt_profile))
+
+    def _desktop_iso(self, desktop: DesktopConfig) -> str:
+        raw_desktop = self._state.get("desktops", {}).get(desktop.id)
+        if isinstance(raw_desktop, dict):
+            return str(raw_desktop.get("install_iso") or "")
+        return str(self._state.get("iso", {}).get(desktop.id, desktop.install_iso))
 
     def _desktop_resources(self, desktop: DesktopConfig) -> dict[str, int]:
         raw = self._state.get("resources", {}).get(desktop.id, {})
@@ -292,6 +402,38 @@ class GvtCloudService:
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    def _unique_desktop_id(self, raw: str) -> str:
+        base = re.sub(r"[^a-zA-Z0-9_-]+", "-", raw.strip().lower()).strip("-") or "desktop"
+        existing = {desktop.id for desktop in self._all_desktop_configs()}
+        candidate = base
+        suffix = 2
+        while candidate in existing:
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        return candidate
+
+    def _allocate_ports(self) -> dict[str, int]:
+        desktops = self._all_desktop_configs()
+        used_spice = {desktop.spice_port for desktop in desktops}
+        used_input = {desktop.input_port for desktop in desktops}
+        used_video = {desktop.video_port for desktop in desktops}
+
+        def next_port(start: int, used: set[int], step: int = 1) -> int:
+            port = start
+            while port in used:
+                port += step
+            return port
+
+        return {
+            "spice": next_port(5900, used_spice),
+            "input": next_port(5905, used_input),
+            "video": next_port(5004, used_video, 2),
+        }
+
+    def _mac_for_index(self, index: int) -> str:
+        value = max(1, min(index, 255))
+        return f"52:54:00:10:{value:02x}:88"
 
     def _qemu_command(self, desktop: DesktopConfig) -> dict[str, Any]:
         args = self.runtime.qemu_cmdline_for_desktop(desktop.id)

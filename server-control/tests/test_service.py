@@ -94,6 +94,25 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(runner.commands[5][-2:], ["stop-vm", "vm1"])
             self.assertEqual(runner.commands[6][-2:], ["input-select", "vm2"])
 
+    def test_create_desktop_registers_stopped_install_vm(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            service, runner = make_service(Path(raw))
+            created = service.create_desktop({
+                "name": "Windows Install",
+                "vcpus": 4,
+                "memory_mib": 4096,
+                "disk_size_gib": 80,
+                "iso_path": "/root/iso/windows.iso",
+                "mode": "realtime",
+                "gvt_profile": "i915-GVTg_V5_8",
+            })
+            self.assertEqual(created["state"], "stopped")
+            self.assertEqual(created["install_iso"], "/root/iso/windows.iso")
+            self.assertEqual(created["disk_size_gib"], 80)
+            self.assertTrue(created["overlay"].replace("\\", "/").endswith("/disks/windows-install.qcow2"))
+            self.assertEqual(runner.commands[0][:4], ["qemu-img", "create", "-f", "qcow2"])
+            self.assertIn(created["id"], {item["id"] for item in service.desktops()})
+
     def test_logs_are_redacted(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             service, _ = make_service(Path(raw))

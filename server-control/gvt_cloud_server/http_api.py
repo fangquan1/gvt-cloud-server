@@ -88,6 +88,8 @@ def make_handler(service: GvtCloudService):
                     self.send_json(200, service.status())
                 elif path == "/api/desktops" and method == "GET":
                     self.send_json(200, {"desktops": service.desktops()})
+                elif path == "/api/desktops" and method == "POST":
+                    self.send_json(200, service.create_desktop(self.read_body()))
                 elif path == "/api/gvtg-profiles" and method == "GET":
                     self.send_json(200, {"profiles": service.gvt_profiles()})
                 elif len(parts) == 3 and parts[:2] == ["api", "desktops"] and method == "GET":
@@ -108,6 +110,8 @@ def make_handler(service: GvtCloudService):
                         self.send_json(200, service.set_desktop_profile(desktop_id, str(body.get("profile", ""))))
                     elif action == "resources":
                         self.send_json(200, service.set_desktop_resources(desktop_id, body))
+                    elif action == "iso":
+                        self.send_json(200, service.set_desktop_iso(desktop_id, body))
                     else:
                         self.send_error_json(404, "not found")
                 elif path == "/api/output/select" and method == "POST":

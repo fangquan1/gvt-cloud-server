@@ -100,6 +100,32 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(result["resources"], {"vcpus": 4, "memory_mib": 8192})
         self.assertEqual(result["last_command"]["ok"], True)
 
+    def test_create_desktop_and_iso_endpoint(self) -> None:
+        login = self.request("POST", "/api/login", {"password": "pw"})
+        created = self.request(
+            "POST",
+            "/api/desktops",
+            {
+                "name": "Windows Install",
+                "vcpus": 4,
+                "memory_mib": 4096,
+                "disk_size_gib": 80,
+                "iso_path": "/root/iso/windows.iso",
+                "mode": "realtime",
+                "gvt_profile": "i915-GVTg_V5_8",
+            },
+            token=login["token"],
+        )
+        self.assertEqual(created["state"], "stopped")
+        self.assertEqual(created["install_iso"], "/root/iso/windows.iso")
+        updated = self.request(
+            "POST",
+            f"/api/desktops/{created['id']}/iso",
+            {"iso_path": ""},
+            token=login["token"],
+        )
+        self.assertEqual(updated["install_iso"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

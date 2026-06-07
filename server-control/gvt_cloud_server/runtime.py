@@ -93,6 +93,11 @@ class ControlRuntime:
         args = [part.format(**values) for part in template]
         return self.runner.run(args, timeout=90)
 
+    def create_qcow2(self, path: str | Path, size_gib: int) -> CommandResult:
+        image_path = Path(path)
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        return self.runner.run(["qemu-img", "create", "-f", "qcow2", str(image_path), f"{size_gib}G"], timeout=180)
+
     def read_json_file(self, path: str | Path) -> dict:
         file_path = Path(path)
         if not file_path.exists():

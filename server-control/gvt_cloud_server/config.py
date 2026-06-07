@@ -28,6 +28,8 @@ class DesktopConfig:
     gvt_profile: str = "i915-GVTg_V5_8"
     tap: str = ""
     mac: str = ""
+    install_iso: str = ""
+    disk_size_gib: int = 80
 
 
 @dataclass(frozen=True)
@@ -146,6 +148,8 @@ def _desktop_from_dict(data: dict[str, Any], root_dir: str) -> DesktopConfig:
         gvt_profile=str(data.get("gvt_profile", defaults.gvt_profile)),
         tap=str(data.get("tap", defaults.tap)),
         mac=str(data.get("mac", defaults.mac)),
+        install_iso=str(data.get("install_iso", defaults.install_iso)),
+        disk_size_gib=_as_int(data.get("disk_size_gib"), defaults.disk_size_gib),
     )
 
 
