@@ -51,6 +51,109 @@ def make_handler(service: GvtCloudService):
             parsed = urllib.parse.parse_qs(raw.decode("utf-8"))
             return {key: values[-1] for key, values in parsed.items()}
 
+        def handle_upload(self) -> None:
+            content_type = self.headers.get("Content-Type", "")
+            if "multipart/form-data" not in content_type:
+                self.send_error_json(400, "expected multipart upload")
+                return
+            _, params = content_type.split(";", 1)
+            boundary = ""
+            for part in params.split(";"):
+                key, _, value = part.strip().partition("=")
+                if key.lower() == "boundary":
+                    boundary = value.strip().strip('"')
+            if not boundary:
+                self.send_error_json(400, "missing multipart boundary")
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0:
+                self.send_error_json(400, "missing file")
+                return
+            if length > 20 * 1024 * 1024 * 1024:
+                self.send_error_json(413, "upload too large")
+                return
+            kind = ""
+            boundary_line = ("--" + boundary).encode("ascii", "ignore")
+            file_boundary = b"\r\n" + boundary_line
+            remaining = length
+
+            def read_line() -> bytes:
+                nonlocal remaining
+                line = self.rfile.readline()
+                remaining -= len(line)
+                return line
+
+            def read_chunk(max_size: int) -> bytes:
+                nonlocal remaining
+                if remaining <= 0:
+                    return b""
+                chunk = self.rfile.read(min(max_size, remaining))
+                remaining -= len(chunk)
+                return chunk
+
+            first = read_line()
+            if not first.startswith(boundary_line):
+                self.send_error_json(400, "invalid multipart body")
+                return
+            while True:
+                headers: dict[str, str] = {}
+                while True:
+                    line = read_line()
+                    if line in {b"\r\n", b"\n", b""}:
+                        break
+                    key, _, value = line.decode("utf-8", errors="replace").partition(":")
+                    headers[key.lower()] = value.strip()
+                disposition = headers.get("content-disposition", "")
+                disp_params: dict[str, str] = {}
+                for item in disposition.split(";"):
+                    key, _, value = item.strip().partition("=")
+                    if key:
+                        disp_params[key.lower()] = value.strip().strip('"')
+                name = disp_params.get("name", "")
+                if name == "kind":
+                    data = b""
+                    while True:
+                        line = read_line()
+                        if line.startswith(boundary_line):
+                            break
+                        data += line
+                    kind = data.decode("utf-8", errors="replace").strip()
+                    if line.strip().endswith(b"--"):
+                        break
+                elif name == "file":
+                    filename = disp_params.get("filename", "")
+                    if not filename:
+                        self.send_error_json(400, "missing file")
+                        return
+                    target = service.upload_target_path(kind, filename)
+                    with target.open("wb") as handle:
+                        buffer = b""
+                        keep = len(file_boundary) + 8
+                        while True:
+                            chunk = read_chunk(1024 * 1024)
+                            if not chunk:
+                                target.unlink(missing_ok=True)
+                                self.send_error_json(400, "unterminated multipart file")
+                                return
+                            buffer += chunk
+                            index = buffer.find(file_boundary)
+                            if index >= 0:
+                                handle.write(buffer[:index])
+                                break
+                            if len(buffer) > keep:
+                                handle.write(buffer[:-keep])
+                                buffer = buffer[-keep:]
+                    self.send_json(200, {"ok": True, "path": str(target), "kind": kind, "filename": target.name})
+                    return
+                else:
+                    while True:
+                        line = read_line()
+                        if line.startswith(boundary_line) or not line:
+                            break
+                    if line.strip().endswith(b"--"):
+                        break
+            self.send_error_json(400, "missing file")
+
         def token(self) -> str | None:
             auth = self.headers.get("Authorization", "")
             if auth.startswith("Bearer "):
@@ -92,6 +195,8 @@ def make_handler(service: GvtCloudService):
                     self.send_json(200, service.create_desktop(self.read_body()))
                 elif path == "/api/gvtg-profiles" and method == "GET":
                     self.send_json(200, {"profiles": service.gvt_profiles()})
+                elif path == "/api/uploads" and method == "POST":
+                    self.handle_upload()
                 elif len(parts) == 3 and parts[:2] == ["api", "desktops"] and method == "GET":
                     self.send_json(200, service.desktop(parts[2]))
                 elif len(parts) == 4 and parts[:2] == ["api", "desktops"] and method == "POST":

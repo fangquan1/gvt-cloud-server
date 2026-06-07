@@ -126,6 +126,31 @@ class HttpApiTests(unittest.TestCase):
         )
         self.assertEqual(updated["install_iso"], "")
 
+    def test_upload_iso_endpoint(self) -> None:
+        login = self.request("POST", "/api/login", {"password": "pw"})
+        boundary = "test-boundary"
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="kind"\r\n\r\n'
+            "iso\r\n"
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file"; filename="windows.iso"\r\n'
+            "Content-Type: application/octet-stream\r\n\r\n"
+        ).encode("utf-8") + b"ISO-DATA" + f"\r\n--{boundary}--\r\n".encode("utf-8")
+        request = urllib.request.Request(
+            self.base + "/api/uploads",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {login['token']}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        self.assertTrue(result["path"].replace("\\", "/").endswith("/uploads/iso/windows.iso"))
+        self.assertTrue(Path(result["path"]).exists())
+
 
 if __name__ == "__main__":
     unittest.main()

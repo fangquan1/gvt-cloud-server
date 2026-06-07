@@ -513,13 +513,20 @@ start_one() {
 
     setup_tap "$tap"
     rm -f "$qmp" "$mon"
-    upper=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')
-    mode_var="${upper}_MODE"
-    vm_mode="${!mode_var:-${VM_MODE:-physical}}"
-    vcpus_var="${upper}_VCPUS"
-    memory_var="${upper}_MEMORY_MIB"
-    vcpus="${!vcpus_var:-${VM_VCPUS:-4}}"
-    memory_mib="${!memory_var:-${VM_MEMORY_MIB:-4096}}"
+    vm_mode="${VM_MODE:-physical}"
+    vcpus="${VM_VCPUS:-4}"
+    memory_mib="${VM_MEMORY_MIB:-4096}"
+    case "$name" in
+        vm1|vm2)
+            upper=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')
+            mode_var="${upper}_MODE"
+            vcpus_var="${upper}_VCPUS"
+            memory_var="${upper}_MEMORY_MIB"
+            vm_mode="${!mode_var:-$vm_mode}"
+            vcpus="${!vcpus_var:-$vcpus}"
+            memory_mib="${!memory_var:-$memory_mib}"
+            ;;
+    esac
     ensure_mdev_for_vm "$name"
 
     (

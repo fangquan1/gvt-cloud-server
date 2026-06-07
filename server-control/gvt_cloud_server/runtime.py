@@ -98,6 +98,22 @@ class ControlRuntime:
         image_path.parent.mkdir(parents=True, exist_ok=True)
         return self.runner.run(["qemu-img", "create", "-f", "qcow2", str(image_path), f"{size_gib}G"], timeout=180)
 
+    def upload_path(self, kind: str, filename: str) -> Path:
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(filename).name).strip(".-") or "upload.bin"
+        subdir = "iso" if kind == "iso" else "disks"
+        target_dir = Path(self.config.runtime.root_dir) / "uploads" / subdir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / safe_name
+        if not target.exists():
+            return target
+        stem = target.stem
+        suffix = target.suffix
+        for index in range(2, 10000):
+            candidate = target_dir / f"{stem}-{index}{suffix}"
+            if not candidate.exists():
+                return candidate
+        raise RuntimeError("too many upload name collisions")
+
     def read_json_file(self, path: str | Path) -> dict:
         file_path = Path(path)
         if not file_path.exists():

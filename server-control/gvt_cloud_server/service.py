@@ -86,6 +86,16 @@ class GvtCloudService:
     def gvt_profiles(self) -> list[dict[str, Any]]:
         return self.runtime.gvt_profiles()
 
+    def upload_target_path(self, kind: str, filename: str) -> Path:
+        if kind not in {"iso", "qcow2"}:
+            raise ApiError(400, "upload kind must be iso or qcow2")
+        lowered = filename.lower()
+        if kind == "iso" and not lowered.endswith(".iso"):
+            raise ApiError(400, "ISO upload must end with .iso")
+        if kind == "qcow2" and not lowered.endswith(".qcow2"):
+            raise ApiError(400, "qcow2 upload must end with .qcow2")
+        return self.runtime.upload_path(kind, filename)
+
     def desktop(self, desktop_id: str) -> dict[str, Any]:
         desktop = self._desktop_config(desktop_id)
         pid, running = self.runtime.pid_status(desktop)
@@ -120,7 +130,11 @@ class GvtCloudService:
 
     def create_desktop(self, payload: dict[str, Any]) -> dict[str, Any]:
         name = str(payload.get("name") or "Windows Desktop").strip() or "Windows Desktop"
-        desktop_id = self._unique_desktop_id(str(payload.get("id") or name))
+        if name in {desktop.name for desktop in self._all_desktop_configs()}:
+            raise ApiError(409, "desktop name already exists")
+        desktop_id = self._desktop_id_from_name(str(payload.get("id") or name))
+        if desktop_id in {desktop.id for desktop in self._all_desktop_configs()}:
+            raise ApiError(409, "desktop id already exists")
         mode = str(payload.get("mode") or "realtime")
         if mode not in VALID_MODES:
             raise ApiError(400, "invalid mode")
@@ -403,15 +417,8 @@ class GvtCloudService:
         except (TypeError, ValueError):
             return default
 
-    def _unique_desktop_id(self, raw: str) -> str:
-        base = re.sub(r"[^a-zA-Z0-9_-]+", "-", raw.strip().lower()).strip("-") or "desktop"
-        existing = {desktop.id for desktop in self._all_desktop_configs()}
-        candidate = base
-        suffix = 2
-        while candidate in existing:
-            candidate = f"{base}-{suffix}"
-            suffix += 1
-        return candidate
+    def _desktop_id_from_name(self, raw: str) -> str:
+        return re.sub(r"[^a-zA-Z0-9_-]+", "-", raw.strip().lower()).strip("-") or "desktop"
 
     def _allocate_ports(self) -> dict[str, int]:
         desktops = self._all_desktop_configs()
