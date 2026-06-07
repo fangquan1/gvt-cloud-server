@@ -525,6 +525,7 @@ static bool present_source(Daemon *d, Source *src)
     drmModeAtomicReq *req;
     uint32_t flags = 0;
     bool ok;
+    int commit_errno = 0;
 
     if (!src || !src->fb_id || !init_kms(d, src)) {
         return false;
@@ -567,6 +568,15 @@ static bool present_source(Daemon *d, Source *src)
         d->presented++;
         ok = true;
     } else {
+        commit_errno = errno;
+        if (d->failed < 8 || d->failed % 60 == 0) {
+            fprintf(stderr, "gvt-outputd: atomic-present failed source=%s "
+                    "fb=%u size=%ux%u mode=%ux%u flags=0x%x props_ok=%d "
+                    "errno=%d (%s)\n",
+                    src->name, src->fb_id, src->width, src->height,
+                    kms->mode.hdisplay, kms->mode.vdisplay, flags, ok,
+                    commit_errno, strerror(commit_errno));
+        }
         d->failed++;
         ok = false;
     }
@@ -641,6 +651,14 @@ static void handle_frame(Daemon *d, GVTOutputdFrameMsg *msg, int fd)
     }
 
     if (drmPrimeFDToHandle(d->kms.fd, fd, &handle) != 0) {
+        if (d->failed < 8 || d->failed % 60 == 0) {
+            fprintf(stderr, "gvt-outputd: prime-fd-to-handle failed "
+                    "source=%s size=%ux%u fourcc=%s stride=%u "
+                    "modifier=0x%016" PRIx64 " errno=%d (%s)\n",
+                    src->name, src->width, src->height,
+                    fourcc_str(src->fourcc, fourcc), src->stride,
+                    src->modifier, errno, strerror(errno));
+        }
         d->failed++;
         close(fd);
         return;
@@ -655,6 +673,14 @@ static void handle_frame(Daemon *d, GVTOutputdFrameMsg *msg, int fd)
                                    src->fourcc, handles, strides, offsets,
                                    modifiers, &fb_id,
                                    DRM_MODE_FB_MODIFIERS) != 0) {
+        if (d->failed < 8 || d->failed % 60 == 0) {
+            fprintf(stderr, "gvt-outputd: addfb2-modifiers failed "
+                    "source=%s size=%ux%u fourcc=%s stride=%u offset=%u "
+                    "modifier=0x%016" PRIx64 " handle=%u errno=%d (%s)\n",
+                    src->name, src->width, src->height,
+                    fourcc_str(src->fourcc, fourcc), src->stride, src->offset,
+                    src->modifier, handle, errno, strerror(errno));
+        }
         d->failed++;
         drmCloseBufferHandle(d->kms.fd, handle);
         return;

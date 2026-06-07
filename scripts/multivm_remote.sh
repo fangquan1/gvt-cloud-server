@@ -467,7 +467,10 @@ start_one() {
                 ;;
         esac
         if [ "$vm_mode" = "physical" ] && [ -n "$kms_connector" ]; then
-            export GVT_STREAM_KMS_CONNECTOR="$kms_connector"
+            # In multi-VM physical mode only gvt-outputd owns the DRM connector.
+            # QEMU publishes DMABUF frames to the daemon; it must not also try
+            # to modeset the same connector directly.
+            unset GVT_STREAM_KMS_CONNECTOR
             export GVT_STREAM_PUBLISH_SOCKET="$OUTPUTD_SOCK"
         else
             unset GVT_STREAM_KMS_CONNECTOR GVT_STREAM_PUBLISH_SOCKET
