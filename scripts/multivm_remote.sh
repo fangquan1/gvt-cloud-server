@@ -760,16 +760,31 @@ start_one() {
         unset GVT_AUDIO_RTP_HOST GVT_AUDIO_RTP_PORT
         unset GVT_STREAM_CAPTURE_DIR GVT_STREAM_ENCODE_FILE
         local boot_args=(-boot order=c)
+        local display_args=(-display gvt-stream,rendernode=/dev/dri/renderD128,codec=h264)
+        local spice_args=(
+            -spice port="$spice_port",addr=0.0.0.0,disable-ticketing=on,agent-mouse=off,playback-compression=off,streaming-video=off,image-compression=off,disable-copy-paste=on,disable-agent-file-xfer=on,display=none
+        )
+        local install_display_args=()
+        local vfio_args=(
+            -device vfio-pci-nohotplug,sysfsdev="/sys/bus/pci/devices/0000:00:02.0/$uuid",display=on,x-igd-opregion=on,ramfb=on
+        )
         if [ -n "$install_iso" ]; then
             boot_args=(-boot order=d -cdrom "$install_iso")
+            display_args=(-display none)
+            spice_args=(
+                -spice port="$spice_port",addr=0.0.0.0,disable-ticketing=on,agent-mouse=on,playback-compression=off,streaming-video=off,image-compression=off,disable-copy-paste=on,disable-agent-file-xfer=on
+            )
+            install_display_args=(-device qxl-vga)
+            vfio_args=()
         fi
 
         nohup "$QEMU_BIN" \
             --nodefaults -enable-kvm -cpu host -m "$memory_mib" -smp "$vcpus" "${boot_args[@]}" \
             -name "$name" \
-            -display gvt-stream,rendernode=/dev/dri/renderD128,codec=h264 \
-            -spice port="$spice_port",addr=0.0.0.0,disable-ticketing=on,agent-mouse=off,playback-compression=off,streaming-video=off,image-compression=off,disable-copy-paste=on,disable-agent-file-xfer=on,display=none \
-            -device vfio-pci-nohotplug,sysfsdev="/sys/bus/pci/devices/0000:00:02.0/$uuid",display=on,x-igd-opregion=on,ramfb=on \
+            "${display_args[@]}" \
+            "${spice_args[@]}" \
+            "${install_display_args[@]}" \
+            "${vfio_args[@]}" \
             -hda "$disk" \
             -netdev tap,id=net0,ifname="$tap",script=no,downscript=no \
             -device e1000e,netdev=net0,mac="$mac" \
