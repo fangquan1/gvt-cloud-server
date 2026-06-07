@@ -113,6 +113,26 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(runner.commands[0][:4], ["qemu-img", "create", "-f", "qcow2"])
             self.assertIn(created["id"], {item["id"] for item in service.desktops()})
 
+    def test_delete_dynamic_desktop_keeps_disk_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            service, _ = make_service(Path(raw))
+            created = service.create_desktop({"name": "Delete Me", "gvt_profile": "i915-GVTg_V5_8"})
+            disk = Path(created["overlay"])
+            disk.write_text("disk", encoding="utf-8")
+            result = service.delete_desktop(created["id"], {})
+            self.assertEqual(result["ok"], True)
+            self.assertTrue(disk.exists())
+            self.assertNotIn(created["id"], {item["id"] for item in service.desktops()})
+
+    def test_delete_dynamic_desktop_can_delete_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            service, _ = make_service(Path(raw))
+            created = service.create_desktop({"name": "Delete Disk", "gvt_profile": "i915-GVTg_V5_8"})
+            disk = Path(created["overlay"])
+            disk.write_text("disk", encoding="utf-8")
+            service.delete_desktop(created["id"], {"delete_disk": True})
+            self.assertFalse(disk.exists())
+
     def test_logs_are_redacted(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             service, _ = make_service(Path(raw))

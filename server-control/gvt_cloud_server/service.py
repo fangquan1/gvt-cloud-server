@@ -265,6 +265,35 @@ class GvtCloudService:
         self._save_state()
         return self.desktop(desktop.id)
 
+    def delete_desktop(self, desktop_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        desktop = self._desktop_config(desktop_id)
+        if desktop_id in {item.id for item in self.config.desktops}:
+            raise ApiError(409, "built-in desktops cannot be deleted")
+        if self.runtime.pid_status(desktop)[1]:
+            raise ApiError(409, "stop the desktop before deleting it")
+        raw_desktops = self._state.get("desktops", {})
+        if not isinstance(raw_desktops, dict) or desktop_id not in raw_desktops:
+            raise ApiError(404, "desktop not found")
+        delete_disk = bool(payload.get("delete_disk") or payload.get("deleteDisk"))
+        disk_path = str(raw_desktops.get(desktop_id, {}).get("overlay") or desktop.overlay)
+        raw_desktops.pop(desktop_id, None)
+        for key in ("modes", "profiles", "resources", "iso"):
+            bucket = self._state.get(key)
+            if isinstance(bucket, dict):
+                bucket.pop(desktop_id, None)
+        if self._state.get("output_source") == desktop_id:
+            self._state["output_source"] = ""
+        if self._state.get("input_source") == desktop_id:
+            self._state["input_source"] = ""
+        if self._state.get("audio_source") == desktop_id:
+            self._state["audio_source"] = ""
+        self.runtime.remove_output(desktop_id)
+        if delete_disk and disk_path:
+            self.runtime.delete_file(disk_path)
+        self._save_state()
+        return {"ok": True, "id": desktop_id, "deleted_disk": delete_disk}
+
     def select_output(self, source: str) -> dict[str, Any]:
         self._desktop_config(source)
         self._state["output_source"] = source

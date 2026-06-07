@@ -217,6 +217,8 @@ def make_handler(service: GvtCloudService):
                         self.send_json(200, service.set_desktop_resources(desktop_id, body))
                     elif action == "iso":
                         self.send_json(200, service.set_desktop_iso(desktop_id, body))
+                    elif action == "delete":
+                        self.send_json(200, service.delete_desktop(desktop_id, body))
                     else:
                         self.send_error_json(404, "not found")
                 elif path == "/api/output/select" and method == "POST":

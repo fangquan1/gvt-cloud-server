@@ -114,6 +114,11 @@ class ControlRuntime:
                 return candidate
         raise RuntimeError("too many upload name collisions")
 
+    def delete_file(self, path: str | Path) -> None:
+        target = Path(path)
+        if target.exists() and target.is_file():
+            target.unlink()
+
     def read_json_file(self, path: str | Path) -> dict:
         file_path = Path(path)
         if not file_path.exists():

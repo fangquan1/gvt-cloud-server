@@ -125,6 +125,14 @@ class HttpApiTests(unittest.TestCase):
             token=login["token"],
         )
         self.assertEqual(updated["install_iso"], "")
+        deleted = self.request(
+            "POST",
+            f"/api/desktops/{created['id']}/delete",
+            {},
+            token=login["token"],
+        )
+        self.assertEqual(deleted["ok"], True)
+        self.assertEqual(deleted["deleted_disk"], False)
 
     def test_upload_iso_endpoint(self) -> None:
         login = self.request("POST", "/api/login", {"password": "pw"})
