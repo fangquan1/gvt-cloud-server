@@ -94,6 +94,20 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(runner.commands[5][-2:], ["stop-vm", "vm1"])
             self.assertEqual(runner.commands[6][-2:], ["input-select", "vm2"])
 
+    def test_connecting_running_desktop_restarts_when_rtp_target_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            service, runner = make_service(Path(raw))
+
+            def pid_status(desktop):
+                stopped = any(command[-2:] == ["stop-vm", desktop.id] for command in runner.commands)
+                return (123, desktop.id == "vm1" and not stopped)
+
+            service.runtime.pid_status = pid_status  # type: ignore[method-assign]
+            service.start_desktop("vm1", {"client_host": "192.168.0.219"})
+            self.assertEqual(runner.commands[0][-4:], ["set-resources", "vm1", "4", "4096"])
+            self.assertEqual(runner.commands[1][-2:], ["stop-vm", "vm1"])
+            self.assertEqual(runner.commands[2][-3:], ["start-vm", "vm1", "192.168.0.219"])
+
     def test_create_desktop_registers_stopped_install_vm(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             service, runner = make_service(Path(raw))

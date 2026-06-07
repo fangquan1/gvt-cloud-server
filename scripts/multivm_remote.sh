@@ -141,6 +141,20 @@ qemu_pids_for_vm() {
         }'
 }
 
+stream_target_matches() {
+    local name=$1
+    local host=$2
+    local port=$3
+    local log="$DIR/$name.log"
+    local line
+    line=$(grep -E 'gvt-stream: init host=' "$log" 2>/dev/null | tail -1 || true)
+    [ -n "$line" ] || return 1
+    case "$line" in
+        *"host=$host port=$port "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 load_vm_meta() {
     local name=$1
     load_config
@@ -1025,6 +1039,14 @@ start_vm() {
     esac
     eval "$(load_vm_meta "$name")"
     vm_mode="$VM_MODE"
+    if [ -n "$client_host" ] && [ "$vm_mode" != "physical" ] && [ -n "$(qemu_pids_for_vm "$name")" ]; then
+        if ! stream_target_matches "$name" "$client_host" "$VM_VIDEO_PORT"; then
+            echo "$name is running without RTP target $client_host:$VM_VIDEO_PORT; restarting" >&2
+            stop_one "$name"
+            eval "$(load_vm_meta "$name")"
+            vm_mode="$VM_MODE"
+        fi
+    fi
     if [ "$vm_mode" = "physical" ]; then
         connector=$(detect_connector)
         start_outputd "$connector"

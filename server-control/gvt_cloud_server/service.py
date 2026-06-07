@@ -205,6 +205,9 @@ class GvtCloudService:
                 memory_mib=resources["memory_mib"],
             )
         client_host = str(payload.get("client_host") or payload.get("_client_host") or "")
+        _, running = self.runtime.pid_status(desktop)
+        if running and client_host and mode != "physical" and not self._stream_rtp_target_matches(desktop, client_host):
+            self.stop_desktop(desktop.id)
         result = self._run("desktop_start", id=desktop.id, mode=mode, profile=profile, client_host=client_host)
         return self._with_command(self.desktop(desktop.id), result)
 
@@ -560,3 +563,13 @@ class GvtCloudService:
             "encoded": None,
             "encode_failures": None,
         }
+
+    def _stream_rtp_target_matches(self, desktop: DesktopConfig, client_host: str) -> bool:
+        matches = re.findall(
+            r"gvt-stream:\s+init\s+host=([^\s]*)\s+port=([0-9]+)",
+            self.runtime.safe_log(desktop.log_file),
+        )
+        if not matches:
+            return False
+        host, port = matches[-1]
+        return host == client_host and int(port) > 0
