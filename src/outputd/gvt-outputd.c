@@ -419,28 +419,42 @@ static bool atomic_add(drmModeAtomicReq *req, uint32_t obj, uint32_t prop,
 
 static void draw_cursor(uint32_t *pixels, uint32_t width, uint32_t height)
 {
+    static const char *shape[] = {
+        "B...............................",
+        "BB..............................",
+        "BWB.............................",
+        "BWWB............................",
+        "BWWWB...........................",
+        "BWWWWB..........................",
+        "BWWWWWB.........................",
+        "BWWWWWWB........................",
+        "BWWWWWWWB.......................",
+        "BWWWWWWWWB......................",
+        "BWWWWWWWWWB.....................",
+        "BWWWWWWWWWWB....................",
+        "BWWWWWWWWWWWB...................",
+        "BWWWWWWBBBBBB...................",
+        "BWWWBWWB........................",
+        "BWWB.BWWB.......................",
+        "BWB..BWWB.......................",
+        "BB...BWWWB......................",
+        "B.....BWWB......................",
+        "......BWWB......................",
+        ".......BB.......................",
+    };
     const uint32_t white = 0xffffffff;
     const uint32_t black = 0xff000000;
+    const size_t rows = sizeof(shape) / sizeof(shape[0]);
 
     memset(pixels, 0, width * height * sizeof(uint32_t));
-    for (uint32_t y = 0; y < 28 && y < height; y++) {
-        for (uint32_t x = 0; x <= y / 2 && x < width; x++) {
-            pixels[y * width + x] = black;
-        }
-    }
-    for (uint32_t y = 3; y < 24 && y < height; y++) {
-        for (uint32_t x = 2; x <= y / 2 && x + 2 < width; x++) {
-            pixels[y * width + x] = white;
-        }
-    }
-    for (uint32_t y = 20; y < 38 && y < height; y++) {
-        for (uint32_t x = 8; x < 15 && x < width; x++) {
-            pixels[y * width + x] = black;
-        }
-    }
-    for (uint32_t y = 23; y < 35 && y < height; y++) {
-        for (uint32_t x = 10; x < 13 && x < width; x++) {
-            pixels[y * width + x] = white;
+    for (uint32_t y = 0; y < height && y < rows; y++) {
+        const char *row = shape[y];
+        for (uint32_t x = 0; x < width && row[x]; x++) {
+            if (row[x] == 'B') {
+                pixels[y * width + x] = black;
+            } else if (row[x] == 'W') {
+                pixels[y * width + x] = white;
+            }
         }
     }
 }
