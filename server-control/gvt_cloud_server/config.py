@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-VALID_MODES = {"realtime", "power_save", "physical"}
+VALID_MODES = {"realtime", "realtime30", "power_save", "physical"}
 
 
 @dataclass(frozen=True)
@@ -18,11 +18,14 @@ class DesktopConfig:
     input_port: int
     video_port: int = 5004
     audio_port: int = 5900
+    vcpus: int = 4
+    memory_mib: int = 4096
     resolution: str = "1024x768"
     overlay: str = ""
     pid_file: str = ""
     log_file: str = ""
     mode: str = "realtime"
+    gvt_profile: str = "i915-GVTg_V5_8"
     tap: str = ""
     mac: str = ""
 
@@ -67,9 +70,12 @@ def default_desktops(root_dir: str) -> tuple[DesktopConfig, ...]:
             input_port=5905,
             video_port=5004,
             audio_port=5900,
+            vcpus=4,
+            memory_mib=4096,
             overlay=f"{root_dir}/win10-vm1.qcow2",
             pid_file=f"{root_dir}/vm1.pid",
             log_file=f"{root_dir}/vm1.log",
+            gvt_profile="i915-GVTg_V5_8",
             tap="tap-win10a",
             mac="52:54:00:10:01:88",
         ),
@@ -80,9 +86,12 @@ def default_desktops(root_dir: str) -> tuple[DesktopConfig, ...]:
             input_port=5906,
             video_port=5008,
             audio_port=5901,
+            vcpus=4,
+            memory_mib=4096,
             overlay=f"{root_dir}/win10-vm2.qcow2",
             pid_file=f"{root_dir}/vm2.pid",
             log_file=f"{root_dir}/vm2.log",
+            gvt_profile="i915-GVTg_V5_8",
             tap="tap-win10b",
             mac="52:54:00:10:02:88",
         ),
@@ -93,10 +102,12 @@ def default_commands(root_dir: str) -> dict[str, list[str]]:
     script = f"{root_dir}/multivm_remote.sh"
     return {
         "setup": [script, "setup"],
-        "desktop_start": [script, "start-vm", "{id}"],
+        "desktop_start": [script, "start-vm", "{id}", "{client_host}"],
         "desktop_stop": [script, "stop-vm", "{id}"],
         "desktop_restart": [script, "restart-vm", "{id}"],
         "desktop_mode": [script, "set-mode", "{id}", "{mode}"],
+        "desktop_profile": [script, "set-profile", "{id}", "{profile}"],
+        "desktop_resources": [script, "set-resources", "{id}", "{vcpus}", "{memory_mib}"],
         "output_select": [script, "select", "{source}"],
         "input_select": [script, "input-select", "{source}"],
         "audio_select": [script, "audio-select", "{source}"],
@@ -125,11 +136,14 @@ def _desktop_from_dict(data: dict[str, Any], root_dir: str) -> DesktopConfig:
         input_port=_as_int(data.get("input_port"), defaults.input_port),
         video_port=_as_int(data.get("video_port"), defaults.video_port),
         audio_port=_as_int(data.get("audio_port"), defaults.audio_port),
+        vcpus=_as_int(data.get("vcpus"), defaults.vcpus),
+        memory_mib=_as_int(data.get("memory_mib"), defaults.memory_mib),
         resolution=str(data.get("resolution", defaults.resolution)),
         overlay=str(data.get("overlay", defaults.overlay)),
         pid_file=str(data.get("pid_file", defaults.pid_file)),
         log_file=str(data.get("log_file", defaults.log_file)),
         mode=mode,
+        gvt_profile=str(data.get("gvt_profile", defaults.gvt_profile)),
         tap=str(data.get("tap", defaults.tap)),
         mac=str(data.get("mac", defaults.mac)),
     )

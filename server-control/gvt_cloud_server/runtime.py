@@ -17,6 +17,7 @@ MAGIC = 0x4756544F
 VERSION = 1
 MSG_SELECT = 2
 SOURCE_LEN = 32
+MDEV_PARENT = Path("/sys/devices/pci0000:00/0000:00:02.0")
 
 SECRET_PATTERNS = [
     re.compile(r"(?i)\b([A-Z0-9_-]*(?:password|passwd|pwd|token|secret|api[_-]?key)[A-Z0-9_-]*)\s*=\s*([^\s]+)"),
@@ -104,16 +105,19 @@ class ControlRuntime:
         return self.read_json_file(self.config.runtime.outputd_status)
 
     def pid_status(self, desktop: DesktopConfig) -> tuple[int | None, bool]:
+        found_pid = self.qemu_pid_for_desktop(desktop.id)
         if not desktop.pid_file:
-            return None, False
+            return found_pid, found_pid is not None
         path = Path(desktop.pid_file)
         if not path.exists():
-            return None, False
+            return found_pid, found_pid is not None
         try:
             pid = int(path.read_text(encoding="utf-8", errors="ignore").strip())
         except ValueError:
-            return None, False
-        return pid, self.pid_exists(pid)
+            return found_pid, found_pid is not None
+        if self.pid_matches_desktop(pid, desktop.id):
+            return pid, True
+        return found_pid or pid, found_pid is not None
 
     def pid_exists(self, pid: int) -> bool:
         if pid <= 0:
@@ -125,6 +129,70 @@ class ControlRuntime:
             return True
         except OSError:
             return False
+
+    def qemu_cmdline_for_desktop(self, desktop_id: str) -> list[str]:
+        pid = self.qemu_pid_for_desktop(desktop_id)
+        if pid is None or os.name == "nt":
+            return []
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return []
+        parts = [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
+        if parts and "qemu-system" in Path(parts[0]).name:
+            return parts
+        return []
+
+    def pid_matches_desktop(self, pid: int, desktop_id: str) -> bool:
+        if pid <= 0:
+            return False
+        if os.name == "nt":
+            return self.pid_exists(pid)
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return False
+        parts = [part.decode("utf-8", errors="ignore") for part in raw.split(b"\0") if part]
+        if not parts or "qemu-system" not in Path(parts[0]).name:
+            return False
+        return "-name" in parts and desktop_id in parts
+
+    def qemu_pid_for_desktop(self, desktop_id: str) -> int | None:
+        if os.name == "nt":
+            return None
+        proc = Path("/proc")
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            if self.pid_matches_desktop(pid, desktop_id):
+                return pid
+        return None
+
+    def gvt_profiles(self) -> list[dict]:
+        base = MDEV_PARENT / "mdev_supported_types"
+        if not base.exists():
+            return []
+        profiles: list[dict] = []
+        for path in sorted(base.glob("i915-GVTg_*")):
+            description = (path / "description").read_text(encoding="utf-8", errors="replace") if (path / "description").exists() else ""
+            item: dict[str, object] = {
+                "id": path.name,
+                "available_instances": self._read_int(path / "available_instances"),
+                "description": description,
+            }
+            for line in description.splitlines():
+                key, _, value = line.partition(":")
+                if key and value:
+                    item[key.strip()] = value.strip()
+            profiles.append(item)
+        return profiles
+
+    def _read_int(self, path: Path) -> int:
+        try:
+            return int(path.read_text(encoding="utf-8", errors="ignore").strip())
+        except Exception:
+            return 0
 
     def select_output(self, source: str) -> None:
         source_bytes = source.encode("ascii", "ignore")[: SOURCE_LEN - 1]

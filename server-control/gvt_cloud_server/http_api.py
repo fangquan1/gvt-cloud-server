@@ -28,6 +28,9 @@ def make_handler(service: GvtCloudService):
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             if token:
                 self.send_header("Set-Cookie", f"gvt_session={token}; Path=/; HttpOnly; SameSite=Lax")
             self.end_headers()
@@ -85,11 +88,14 @@ def make_handler(service: GvtCloudService):
                     self.send_json(200, service.status())
                 elif path == "/api/desktops" and method == "GET":
                     self.send_json(200, {"desktops": service.desktops()})
+                elif path == "/api/gvtg-profiles" and method == "GET":
+                    self.send_json(200, {"profiles": service.gvt_profiles()})
                 elif len(parts) == 3 and parts[:2] == ["api", "desktops"] and method == "GET":
                     self.send_json(200, service.desktop(parts[2]))
                 elif len(parts) == 4 and parts[:2] == ["api", "desktops"] and method == "POST":
                     desktop_id, action = parts[2], parts[3]
                     body = self.read_body()
+                    body.setdefault("client_host", self.client_address[0])
                     if action == "start":
                         self.send_json(200, service.start_desktop(desktop_id, body))
                     elif action == "stop":
@@ -98,6 +104,10 @@ def make_handler(service: GvtCloudService):
                         self.send_json(200, service.restart_desktop(desktop_id, body))
                     elif action == "mode":
                         self.send_json(200, service.set_desktop_mode(desktop_id, str(body.get("mode", ""))))
+                    elif action == "profile":
+                        self.send_json(200, service.set_desktop_profile(desktop_id, str(body.get("profile", ""))))
+                    elif action == "resources":
+                        self.send_json(200, service.set_desktop_resources(desktop_id, body))
                     else:
                         self.send_error_json(404, "not found")
                 elif path == "/api/output/select" and method == "POST":
@@ -128,6 +138,13 @@ def make_handler(service: GvtCloudService):
 
         def do_POST(self) -> None:
             self.handle_api("POST")
+
+        def do_OPTIONS(self) -> None:
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.end_headers()
 
     return Handler
 

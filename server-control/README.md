@@ -27,6 +27,9 @@ images outside Git.
 - `POST /api/desktops/{id}/stop`
 - `POST /api/desktops/{id}/restart`
 - `POST /api/desktops/{id}/mode`
+- `POST /api/desktops/{id}/profile`
+- `POST /api/desktops/{id}/resources`
+- `GET /api/gvtg-profiles`
 - `POST /api/output/select`
 - `POST /api/input/select`
 - `POST /api/audio/select`

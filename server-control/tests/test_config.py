@@ -15,8 +15,13 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.bind_port, 8098)
         self.assertEqual([desktop.id for desktop in config.desktops], ["vm1", "vm2"])
         self.assertEqual(config.desktops[0].spice_port, 5900)
+        self.assertEqual(config.desktops[0].gvt_profile, "i915-GVTg_V5_8")
+        self.assertEqual(config.desktops[0].vcpus, 4)
+        self.assertEqual(config.desktops[0].memory_mib, 4096)
         self.assertEqual(config.desktops[1].input_port, 5906)
-        self.assertEqual(config.commands["desktop_start"], ["/root/qemu_cmd/multivm/multivm_remote.sh", "start-vm", "{id}"])
+        self.assertEqual(config.commands["desktop_start"], ["/root/qemu_cmd/multivm/multivm_remote.sh", "start-vm", "{id}", "{client_host}"])
+        self.assertEqual(config.commands["desktop_profile"], ["/root/qemu_cmd/multivm/multivm_remote.sh", "set-profile", "{id}", "{profile}"])
+        self.assertEqual(config.commands["desktop_resources"], ["/root/qemu_cmd/multivm/multivm_remote.sh", "set-resources", "{id}", "{vcpus}", "{memory_mib}"])
 
     def test_custom_root_rewrites_default_paths(self) -> None:
         config = config_from_dict({"runtime": {"root_dir": "/tmp/gvt"}})

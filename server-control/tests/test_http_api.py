@@ -75,6 +75,30 @@ class HttpApiTests(unittest.TestCase):
         login = self.request("POST", "/api/login", {"password": "pw"})
         result = self.request("POST", "/api/desktops/vm1/mode", {"mode": "power_save"}, token=login["token"])
         self.assertEqual(result["mode"], "power_save")
+        self.assertEqual(result["last_command"]["ok"], True)
+
+    def test_profile_endpoints(self) -> None:
+        login = self.request("POST", "/api/login", {"password": "pw"})
+        profiles = self.request("GET", "/api/gvtg-profiles", token=login["token"])
+        self.assertIn("profiles", profiles)
+        result = self.request(
+            "POST",
+            "/api/desktops/vm1/profile",
+            {"profile": "i915-GVTg_V5_4"},
+            token=login["token"],
+        )
+        self.assertEqual(result["gvt_profile"], "i915-GVTg_V5_4")
+
+    def test_resources_endpoint(self) -> None:
+        login = self.request("POST", "/api/login", {"password": "pw"})
+        result = self.request(
+            "POST",
+            "/api/desktops/vm1/resources",
+            {"vcpus": 4, "memory_mib": 8192},
+            token=login["token"],
+        )
+        self.assertEqual(result["resources"], {"vcpus": 4, "memory_mib": 8192})
+        self.assertEqual(result["last_command"]["ok"], True)
 
 
 if __name__ == "__main__":

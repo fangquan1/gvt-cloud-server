@@ -14,18 +14,22 @@ from gvt_cloud_server.service import ApiError, GvtCloudService
 
 
 class FakeRunner:
-    def __init__(self) -> None:
+    def __init__(self, root: Path | None = None) -> None:
+        self.root = root
         self.commands: list[list[str]] = []
 
     def run(self, command: list[str], timeout: int = 60) -> CommandResult:
         self.commands.append(command)
+        if self.root and command[-2:] == ["stop-vm", "vm1"]:
+            (self.root / "vm1.pid").unlink(missing_ok=True)
+        if self.root and command[-2:] == ["stop-vm", "vm2"]:
+            (self.root / "vm2.pid").unlink(missing_ok=True)
         return CommandResult(command, 0, "ok", "")
 
 
 def make_service(tmp: Path) -> tuple[GvtCloudService, FakeRunner]:
     root = tmp / "runtime"
     root.mkdir()
-    (root / "vm1.pid").write_text("1234", encoding="utf-8")
     (root / "vm1.log").write_text(
         "WEB_PASSWORD=very-secret\n"
         "gvt-stream: update-stats fps=59.8 capture_ms=16 encoded=120 encode_failures=0\n",
@@ -47,7 +51,7 @@ def make_service(tmp: Path) -> tuple[GvtCloudService, FakeRunner]:
             },
         }
     )
-    runner = FakeRunner()
+    runner = FakeRunner(root)
     service = GvtCloudService(config, ControlRuntime(config, runner))
     return service, runner
 
@@ -67,22 +71,28 @@ class ServiceTests(unittest.TestCase):
             status = service.status()
             self.assertEqual(status["outputd"]["active"], "vm1")
             vm1 = status["desktops"][0]
-            self.assertEqual(vm1["state"], "running")
-            self.assertEqual(vm1["gvt_stream"]["fps"], 59.8)
-            self.assertEqual(vm1["gvt_stream"]["capture_ms"], 16)
-            self.assertEqual(vm1["gvt_stream"]["encode_failures"], 0)
+            self.assertEqual(vm1["state"], "stopped")
+            self.assertEqual(vm1["gvt_profile"], "i915-GVTg_V5_8")
+            self.assertEqual(vm1["resources"], {"vcpus": 4, "memory_mib": 4096})
+            self.assertEqual(vm1["qemu_command"], {"args": [], "line": ""})
+            self.assertIsNone(vm1["gvt_stream"]["fps"])
 
     def test_actions_dispatch_to_multivm_script_templates(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             service, runner = make_service(Path(raw))
             service.set_desktop_mode("vm1", "power_save")
+            service.set_desktop_resources("vm1", {"vcpus": 3, "memory_mib": 6144})
+            service.set_desktop_profile("vm2", "i915-GVTg_V5_4")
             service.start_desktop("vm1")
             service.stop_desktop("vm1")
             service.select_input("vm2")
             self.assertEqual(runner.commands[0][-3:], ["set-mode", "vm1", "power_save"])
-            self.assertEqual(runner.commands[1][-2:], ["start-vm", "vm1"])
-            self.assertEqual(runner.commands[2][-2:], ["stop-vm", "vm1"])
-            self.assertEqual(runner.commands[3][-2:], ["input-select", "vm2"])
+            self.assertEqual(runner.commands[1][-4:], ["set-resources", "vm1", "3", "6144"])
+            self.assertEqual(runner.commands[2][-3:], ["set-profile", "vm2", "i915-GVTg_V5_4"])
+            self.assertEqual(runner.commands[3][-4:], ["set-resources", "vm1", "3", "6144"])
+            self.assertEqual(runner.commands[4][-3:], ["start-vm", "vm1", ""])
+            self.assertEqual(runner.commands[5][-2:], ["stop-vm", "vm1"])
+            self.assertEqual(runner.commands[6][-2:], ["input-select", "vm2"])
 
     def test_logs_are_redacted(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

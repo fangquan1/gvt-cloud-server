@@ -16,7 +16,6 @@ WEB_PORT=${GVT_MULTI_WEB_PORT:-8098}
 BASE_DISK=/root/qemu_cmd/archive/gvtg-spice-net-audio-20260530-1209/win10-gvtg-spice-net-audio.qcow2
 MDEV_PARENT=/sys/devices/pci0000:00/0000:00:02.0
 MDEV_TYPE=i915-GVTg_V5_8
-MDEV_CREATE="$MDEV_PARENT/mdev_supported_types/$MDEV_TYPE/create"
 QEMU_BIN=/usr/local/src/project/qemu/build/qemu-system-x86_64
 BR_IF=br0
 
@@ -46,6 +45,24 @@ EOF
 ensure_config_defaults() {
     if ! grep -q '^WEB_PASSWORD=' "$CONFIG" 2>/dev/null; then
         printf 'WEB_PASSWORD=%s\n' "$(new_web_password)" >>"$CONFIG"
+    fi
+    if ! grep -q '^VM1_PROFILE=' "$CONFIG" 2>/dev/null; then
+        printf 'VM1_PROFILE=%s\n' "$MDEV_TYPE" >>"$CONFIG"
+    fi
+    if ! grep -q '^VM2_PROFILE=' "$CONFIG" 2>/dev/null; then
+        printf 'VM2_PROFILE=%s\n' "$MDEV_TYPE" >>"$CONFIG"
+    fi
+    if ! grep -q '^VM1_VCPUS=' "$CONFIG" 2>/dev/null; then
+        printf 'VM1_VCPUS=4\n' >>"$CONFIG"
+    fi
+    if ! grep -q '^VM2_VCPUS=' "$CONFIG" 2>/dev/null; then
+        printf 'VM2_VCPUS=4\n' >>"$CONFIG"
+    fi
+    if ! grep -q '^VM1_MEMORY_MIB=' "$CONFIG" 2>/dev/null; then
+        printf 'VM1_MEMORY_MIB=4096\n' >>"$CONFIG"
+    fi
+    if ! grep -q '^VM2_MEMORY_MIB=' "$CONFIG" 2>/dev/null; then
+        printf 'VM2_MEMORY_MIB=4096\n' >>"$CONFIG"
     fi
 }
 
@@ -85,18 +102,115 @@ PY
     fi
 
     sleep 2
+    local pids=""
     if [ -f "$pidfile" ]; then
         local pid
         pid=$(cat "$pidfile" 2>/dev/null || true)
         if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-            sleep 2
-            if kill -0 "$pid" 2>/dev/null; then
-                kill -9 "$pid" 2>/dev/null || true
-            fi
+            pids="$pids $pid"
+        fi
+    fi
+    pids="$pids $(qemu_pids_for_vm "$name")"
+    pids=$(printf '%s\n' $pids | awk '!seen[$1]++')
+    if [ -n "${pids:-}" ]; then
+        echo "$pids" | xargs -r kill 2>/dev/null || true
+        sleep 2
+        pids=$(printf '%s\n' $pids | while read -r pid; do
+            [ -n "$pid" ] || continue
+            kill -0 "$pid" 2>/dev/null && echo "$pid" || true
+        done)
+        if [ -n "${pids:-}" ]; then
+            echo "$pids" | xargs -r kill -9 2>/dev/null || true
         fi
     fi
     rm -f "$pidfile" "$qmp" "$DIR/$name-monitor.sock"
+    remove_vm_mdev "$name"
+}
+
+qemu_pids_for_vm() {
+    local name=$1
+    ps -eo pid=,comm=,args= | awk -v vm="$name" '
+        $2 ~ /^qemu-system/ {
+            for (i = 3; i <= NF; i++) {
+                if ($i == "-name" && (i + 1) <= NF && $(i + 1) == vm) {
+                    print $1
+                }
+            }
+        }'
+}
+
+vm_uuid() {
+    case "$1" in
+        vm1) printf '%s\n' "$VM1_UUID" ;;
+        vm2) printf '%s\n' "$VM2_UUID" ;;
+        *) return 1 ;;
+    esac
+}
+
+vm_profile() {
+    case "$1" in
+        vm1) printf '%s\n' "${VM1_PROFILE:-$MDEV_TYPE}" ;;
+        vm2) printf '%s\n' "${VM2_PROFILE:-$MDEV_TYPE}" ;;
+        *) return 1 ;;
+    esac
+}
+
+current_mdev_type() {
+    local uuid=$1
+    if [ -e "/sys/bus/mdev/devices/$uuid/mdev_type" ]; then
+        basename "$(readlink -f "/sys/bus/mdev/devices/$uuid/mdev_type")"
+    fi
+}
+
+remove_vm_mdev() {
+    load_config
+    local uuid
+    uuid=$(vm_uuid "$1")
+    remove_mdev_if_present "$uuid"
+}
+
+ensure_mdev_for_vm() {
+    local name=$1
+    local uuid
+    local profile
+    local type_dir
+    local create
+    uuid=$(vm_uuid "$name")
+    profile=$(vm_profile "$name")
+    type_dir="$MDEV_PARENT/mdev_supported_types/$profile"
+    create="$type_dir/create"
+
+    if [ ! -d "$type_dir" ] || [ ! -e "$create" ]; then
+        echo "$name selected unavailable GVT-g profile $profile" >&2
+        exit 3
+    fi
+
+    if [ -e "/sys/bus/mdev/devices/$uuid" ]; then
+        local current
+        current=$(current_mdev_type "$uuid")
+        if [ "$current" = "$profile" ]; then
+            return
+        fi
+        if [ -n "$(qemu_pids_for_vm "$name")" ]; then
+            echo "$name is running; cannot switch GVT-g profile from $current to $profile" >&2
+            exit 4
+        fi
+        remove_mdev_if_present "$uuid"
+        sleep 1
+    fi
+
+    local available
+    available=$(cat "$type_dir/available_instances" 2>/dev/null || echo 0)
+    if [ "${available:-0}" -le 0 ]; then
+        echo "$name cannot start: no available instance for GVT-g profile $profile" >&2
+        exit 5
+    fi
+    echo "$uuid" >"$create"
+    sleep 1
+    if [ ! -e "/sys/bus/mdev/devices/$uuid" ]; then
+        echo "$name failed to create mdev $uuid for profile $profile" >&2
+        exit 6
+    fi
 }
 
 stop_all() {
@@ -163,8 +277,6 @@ ensure_two_vgpus() {
     done
 
     sleep 1
-    echo "$VM1_UUID" >"$MDEV_CREATE"
-    echo "$VM2_UUID" >"$MDEV_CREATE"
 }
 
 create_overlays() {
@@ -272,7 +384,9 @@ start_one() {
     local mac=$5
     local spice_port=$6
     local input_port=$7
-    local kms_connector=$8
+    local video_port=$8
+    local client_host=$9
+    local kms_connector=${10:-}
     local log="$DIR/$name.log"
     local qmp="$DIR/$name-qmp.sock"
     local mon="$DIR/$name-monitor.sock"
@@ -280,11 +394,11 @@ start_one() {
     local upper
     local mode_var
     local vm_mode
+    local vcpus_var
+    local memory_var
+    local vcpus
+    local memory_mib
 
-    if [ ! -e "/sys/bus/mdev/devices/$uuid" ]; then
-        echo "missing mdev $uuid for $name" >&2
-        exit 1
-    fi
     if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
         echo "$name already running pid=$(cat "$pidfile")"
         return
@@ -295,6 +409,11 @@ start_one() {
     upper=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')
     mode_var="${upper}_MODE"
     vm_mode="${!mode_var:-physical}"
+    vcpus_var="${upper}_VCPUS"
+    memory_var="${upper}_MEMORY_MIB"
+    vcpus="${!vcpus_var:-4}"
+    memory_mib="${!memory_var:-4096}"
+    ensure_mdev_for_vm "$name"
 
     (
         export LD_LIBRARY_PATH=/usr/local/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
@@ -305,31 +424,39 @@ start_one() {
         export GVT_STREAM_REFRESH_MS=16
         export GVT_STREAM_REPORT_MS=1000
         export GVT_STREAM_VERBOSE=0
-        export GVT_STREAM_KMS_CONNECTOR="$kms_connector"
         export GVT_STREAM_KMS_DEVICE=/dev/dri/card0
         export GVT_STREAM_KMS_ATOMIC=1
-        export GVT_STREAM_PUBLISH_SOCKET="$OUTPUTD_SOCK"
         export GVT_STREAM_SOURCE_ID="$name"
         export GVT_STREAM_INPUT_HOST=0.0.0.0
         export GVT_STREAM_INPUT_PORT="$input_port"
         export GVT_STREAM_CAPTURE_MAX=0
         export GVT_STREAM_IMPORT_TEST=0
         export GVT_STREAM_ENCODE_PATH=dmabuf
+        export GVT_STREAM_ENCODE_MAX=0
         export GVT_STREAM_CAPTURE_MS=16
         export GVT_STREAM_IDLE_CHANGED_PPM=3000
         export GVT_STREAM_IDLE_PIXEL_DELTA=8
         case "$vm_mode" in
             realtime)
+                export GVT_STREAM_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_AFTER_MS=0
                 export GVT_STREAM_IDLE_PROBE_MS=0
                 ;;
+            realtime30)
+                export GVT_STREAM_CAPTURE_MS=33
+                export GVT_STREAM_IDLE_CAPTURE_MS=33
+                export GVT_STREAM_IDLE_AFTER_MS=0
+                export GVT_STREAM_IDLE_PROBE_MS=0
+                ;;
             power_save)
+                export GVT_STREAM_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_CAPTURE_MS=66
                 export GVT_STREAM_IDLE_AFTER_MS=1500
                 export GVT_STREAM_IDLE_PROBE_MS=500
                 ;;
             physical|"")
+                export GVT_STREAM_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_AFTER_MS=0
                 export GVT_STREAM_IDLE_PROBE_MS=0
@@ -339,11 +466,28 @@ start_one() {
                 exit 2
                 ;;
         esac
-        unset GVT_STREAM_RTP_HOST GVT_STREAM_RTP_PORT GVT_AUDIO_RTP_HOST GVT_AUDIO_RTP_PORT
+        if [ "$vm_mode" = "physical" ] && [ -n "$kms_connector" ]; then
+            export GVT_STREAM_KMS_CONNECTOR="$kms_connector"
+            export GVT_STREAM_PUBLISH_SOCKET="$OUTPUTD_SOCK"
+        else
+            unset GVT_STREAM_KMS_CONNECTOR GVT_STREAM_PUBLISH_SOCKET
+        fi
+        if [ -n "$client_host" ] && [ "$vm_mode" != "physical" ]; then
+            export GVT_STREAM_RTP_HOST="$client_host"
+            export GVT_STREAM_RTP_PORT="$video_port"
+            export GVT_STREAM_RTP_FEC=0
+            export GVT_STREAM_RTP_FEC_IMPORTANT=0
+            export GVT_STREAM_ENCODE_FPS=60
+            export GVT_STREAM_ENCODE_BITRATE=18000
+            export GVT_STREAM_ENCODE_KEYINT=60
+        else
+            unset GVT_STREAM_RTP_HOST GVT_STREAM_RTP_PORT
+        fi
+        unset GVT_AUDIO_RTP_HOST GVT_AUDIO_RTP_PORT
         unset GVT_STREAM_CAPTURE_DIR GVT_STREAM_ENCODE_FILE
 
         nohup "$QEMU_BIN" \
-            --nodefaults -enable-kvm -cpu host -m 2048 -smp 2 -boot order=c \
+            --nodefaults -enable-kvm -cpu host -m "$memory_mib" -smp "$vcpus" -boot order=c \
             -name "$name" \
             -display gvt-stream,rendernode=/dev/dri/renderD128,codec=h264 \
             -spice port="$spice_port",addr=0.0.0.0,disable-ticketing=on,agent-mouse=off,playback-compression=off,streaming-video=off,image-compression=off,disable-copy-paste=on,disable-agent-file-xfer=on,display=none \
@@ -367,7 +511,7 @@ start_one() {
         tail -160 "$log" >&2 || true
         exit 1
     fi
-    echo "$name started pid=$(cat "$pidfile") disk=$disk spice=$spice_port input=$input_port mode=$vm_mode kms=${kms_connector:-none}"
+    echo "$name started pid=$(cat "$pidfile") disk=$disk spice=$spice_port input=$input_port video=$video_port client=${client_host:-none} mode=$vm_mode vcpus=$vcpus memory_mib=$memory_mib kms=${kms_connector:-none}"
 }
 
 set_vm_mode() {
@@ -382,9 +526,9 @@ set_vm_mode() {
             ;;
     esac
     case "$mode" in
-        realtime|power_save|physical) ;;
+        realtime|realtime30|power_save|physical) ;;
         *)
-            echo "set-mode requires realtime, power_save or physical" >&2
+            echo "set-mode requires realtime, realtime30, power_save or physical" >&2
             exit 2
             ;;
     esac
@@ -412,10 +556,120 @@ PY
     echo "$name mode=$mode"
 }
 
+set_vm_profile() {
+    local name=${1:-}
+    local profile=${2:-}
+
+    case "$name" in
+        vm1|vm2) ;;
+        *)
+            echo "set-profile requires vm1 or vm2" >&2
+            exit 2
+            ;;
+    esac
+    if [ ! -d "$MDEV_PARENT/mdev_supported_types/$profile" ]; then
+        echo "unknown GVT-g profile $profile" >&2
+        exit 2
+    fi
+    load_config
+    if [ -n "$(qemu_pids_for_vm "$name")" ]; then
+        echo "$name is running; stop it before changing GVT-g profile" >&2
+        exit 4
+    fi
+    python3 - "$CONFIG" "$name" "$profile" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+key = sys.argv[2].upper() + "_PROFILE"
+profile = sys.argv[3]
+lines = path.read_text().splitlines() if path.exists() else []
+out = []
+seen = False
+for line in lines:
+    if line.startswith(key + "="):
+        out.append(f"{key}={profile}")
+        seen = True
+    else:
+        out.append(line)
+if not seen:
+    out.append(f"{key}={profile}")
+path.write_text("\n".join(out) + "\n")
+PY
+    echo "$name profile=$profile"
+}
+
+set_vm_resources() {
+    local name=${1:-}
+    local vcpus=${2:-}
+    local memory_mib=${3:-}
+
+    case "$name" in
+        vm1|vm2) ;;
+        *)
+            echo "set-resources requires vm1 or vm2" >&2
+            exit 2
+            ;;
+    esac
+    case "$vcpus" in
+        ''|*[!0-9]*)
+            echo "vcpus must be an integer" >&2
+            exit 2
+            ;;
+    esac
+    case "$memory_mib" in
+        ''|*[!0-9]*)
+            echo "memory_mib must be an integer" >&2
+            exit 2
+            ;;
+    esac
+    if [ "$vcpus" -lt 1 ] || [ "$vcpus" -gt 16 ]; then
+        echo "vcpus must be between 1 and 16" >&2
+        exit 2
+    fi
+    if [ "$memory_mib" -lt 1024 ] || [ "$memory_mib" -gt 32768 ]; then
+        echo "memory_mib must be between 1024 and 32768" >&2
+        exit 2
+    fi
+    if [ $((memory_mib % 256)) -ne 0 ]; then
+        echo "memory_mib must be a multiple of 256" >&2
+        exit 2
+    fi
+    load_config
+    python3 - "$CONFIG" "$name" "$vcpus" "$memory_mib" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+prefix = sys.argv[2].upper()
+values = {
+    prefix + "_VCPUS": sys.argv[3],
+    prefix + "_MEMORY_MIB": sys.argv[4],
+}
+lines = path.read_text().splitlines() if path.exists() else []
+out = []
+seen = set()
+for line in lines:
+    key = line.split("=", 1)[0]
+    if key in values:
+        out.append(f"{key}={values[key]}")
+        seen.add(key)
+    else:
+        out.append(line)
+for key, value in values.items():
+    if key not in seen:
+        out.append(f"{key}={value}")
+path.write_text("\n".join(out) + "\n")
+PY
+    echo "$name vcpus=$vcpus memory_mib=$memory_mib"
+}
+
 start_all() {
     load_config
     create_overlays
     local connector
+    local vm1_connector=""
+    local vm2_connector=""
 
     connector=$(detect_connector)
     if [ -z "$connector" ]; then
@@ -424,24 +678,41 @@ start_all() {
         echo "using KMS connector $connector for vm1"
     fi
     start_outputd "$connector"
+    if [ "${VM1_MODE:-physical}" = "physical" ]; then
+        vm1_connector="$connector"
+    fi
+    if [ "${VM2_MODE:-physical}" = "physical" ]; then
+        vm2_connector="$connector"
+    fi
 
-    start_one vm1 "$VM1_UUID" "$DIR/win10-vm1.qcow2" tap-win10a 52:54:00:10:01:88 5900 5905 ""
-    start_one vm2 "$VM2_UUID" "$DIR/win10-vm2.qcow2" tap-win10b 52:54:00:10:02:88 5901 5906 ""
+    start_one vm1 "$VM1_UUID" "$DIR/win10-vm1.qcow2" tap-win10a 52:54:00:10:01:88 5900 5905 5004 "" "$vm1_connector"
+    start_one vm2 "$VM2_UUID" "$DIR/win10-vm2.qcow2" tap-win10b 52:54:00:10:02:88 5901 5906 5008 "" "$vm2_connector"
     start_web
 }
 
 start_vm() {
     local name=${1:-}
+    local client_host=${2:-}
+    local connector=""
+    local vm_mode=""
     load_config
     create_overlays
     case "$name" in
         vm1)
-            start_outputd "$(detect_connector)"
-            start_one vm1 "$VM1_UUID" "$DIR/win10-vm1.qcow2" tap-win10a 52:54:00:10:01:88 5900 5905 ""
+            vm_mode="${VM1_MODE:-physical}"
+            if [ "$vm_mode" = "physical" ]; then
+                connector=$(detect_connector)
+                start_outputd "$connector"
+            fi
+            start_one vm1 "$VM1_UUID" "$DIR/win10-vm1.qcow2" tap-win10a 52:54:00:10:01:88 5900 5905 5004 "$client_host" "$connector"
             ;;
         vm2)
-            start_outputd "$(detect_connector)"
-            start_one vm2 "$VM2_UUID" "$DIR/win10-vm2.qcow2" tap-win10b 52:54:00:10:02:88 5901 5906 ""
+            vm_mode="${VM2_MODE:-physical}"
+            if [ "$vm_mode" = "physical" ]; then
+                connector=$(detect_connector)
+                start_outputd "$connector"
+            fi
+            start_one vm2 "$VM2_UUID" "$DIR/win10-vm2.qcow2" tap-win10b 52:54:00:10:02:88 5901 5906 5008 "$client_host" "$connector"
             ;;
         *)
             echo "start-vm requires vm1 or vm2" >&2
@@ -465,8 +736,9 @@ stop_vm() {
 
 restart_vm() {
     local name=${1:-}
+    local client_host=${2:-}
     stop_vm "$name"
-    start_vm "$name"
+    start_vm "$name" "$client_host"
 }
 
 select_state() {
@@ -530,7 +802,7 @@ PY
 status_all() {
     load_config
     echo "--- config ---"
-    cat "$CONFIG"
+    sed -E 's/^(WEB_PASSWORD=).*/\1[REDACTED]/' "$CONFIG"
     echo "--- mdevs ---"
     find /sys/bus/mdev/devices -maxdepth 1 -mindepth 1 -type l -printf '%f -> %l\n' 2>/dev/null || true
     for t in "$MDEV_PARENT"/mdev_supported_types/i915-GVTg_*; do
@@ -581,18 +853,24 @@ case "${1:-status}" in
         status_all
         ;;
     start-vm)
-        start_vm "${2:-}"
+        start_vm "${2:-}" "${3:-}"
         status_all
         ;;
     stop-vm)
         stop_vm "${2:-}"
         ;;
     restart-vm)
-        restart_vm "${2:-}"
+        restart_vm "${2:-}" "${3:-}"
         status_all
         ;;
     set-mode)
         set_vm_mode "${2:-}" "${3:-}"
+        ;;
+    set-profile)
+        set_vm_profile "${2:-}" "${3:-}"
+        ;;
+    set-resources)
+        set_vm_resources "${2:-}" "${3:-}" "${4:-}"
         ;;
     input-select)
         select_state input_source "${2:-}"
@@ -626,7 +904,7 @@ case "${1:-status}" in
         status_all
         ;;
     *)
-        echo "usage: $0 {setup|start|stop|status|select|start-vm|stop-vm|restart-vm|set-mode|input-select|audio-select|outputd-restart|web-start|web-stop|web-status}" >&2
+        echo "usage: $0 {setup|start|stop|status|select|start-vm|stop-vm|restart-vm|set-mode|set-profile|set-resources|input-select|audio-select|outputd-restart|web-start|web-stop|web-status}" >&2
         exit 2
         ;;
 esac
