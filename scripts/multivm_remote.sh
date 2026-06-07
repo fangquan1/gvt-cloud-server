@@ -268,6 +268,128 @@ current_mdev_type() {
     fi
 }
 
+profile_available_instances() {
+    local profile=$1
+    local value
+    value=$(cat "$MDEV_PARENT/mdev_supported_types/$profile/available_instances" 2>/dev/null || echo 0)
+    case "$value" in
+        ''|*[!0-9]*) echo 0 ;;
+        *) echo "$value" ;;
+    esac
+}
+
+mdev_used_by_qemu() {
+    local uuid=$1
+    ps -eo args= | grep -F "/sys/bus/pci/devices/0000:00:02.0/$uuid" | grep -qv grep
+}
+
+reclaim_idle_mdevs() {
+    local keep_uuid=${1:-}
+    local dev
+    for dev in /sys/bus/mdev/devices/*; do
+        [ -e "$dev" ] || continue
+        local uuid
+        local real
+        uuid=$(basename "$dev")
+        [ "$uuid" != "$keep_uuid" ] || continue
+        real=$(readlink -f "$dev")
+        case "$real" in
+            "$MDEV_PARENT"/*)
+                if ! mdev_used_by_qemu "$uuid"; then
+                    echo "reclaim idle GVT-g mdev $uuid" >&2
+                    remove_mdev_if_present "$uuid"
+                fi
+                ;;
+        esac
+    done
+}
+
+select_available_profile() {
+    local requested=$1
+    if [ -d "$MDEV_PARENT/mdev_supported_types/$requested" ] &&
+        [ "$(profile_available_instances "$requested")" -gt 0 ]; then
+        printf '%s\n' "$requested"
+        return
+    fi
+
+    python3 - "$MDEV_PARENT" <<'PY'
+import pathlib
+import re
+import sys
+
+parent = pathlib.Path(sys.argv[1])
+candidates = []
+for item in parent.glob("mdev_supported_types/i915-GVTg_*"):
+    try:
+        available = int((item / "available_instances").read_text().strip() or "0")
+    except Exception:
+        available = 0
+    if available <= 0:
+        continue
+    description = ""
+    try:
+        description = (item / "description").read_text(errors="replace")
+    except Exception:
+        pass
+    match = re.search(r"(\d+)\s*x\s*(\d+)", description, re.I)
+    pixels = int(match.group(1)) * int(match.group(2)) if match else 0
+    candidates.append((pixels, available, item.name))
+if candidates:
+    candidates.sort(reverse=True)
+    print(candidates[0][2])
+PY
+}
+
+persist_vm_profile() {
+    local name=$1
+    local profile=$2
+    load_config
+    case "$name" in
+        vm1|vm2)
+            python3 - "$CONFIG" "$name" "$profile" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+key = sys.argv[2].upper() + "_PROFILE"
+profile = sys.argv[3]
+lines = path.read_text().splitlines() if path.exists() else []
+out = []
+seen = False
+for line in lines:
+    if line.startswith(key + "="):
+        out.append(f"{key}={profile}")
+        seen = True
+    else:
+        out.append(line)
+if not seen:
+    out.append(f"{key}={profile}")
+path.write_text("\n".join(out) + "\n")
+PY
+            ;;
+        *)
+            python3 - "$STATE" "$name" "$profile" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+name = sys.argv[2]
+profile = sys.argv[3]
+try:
+    data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+except Exception:
+    data = {}
+data.setdefault("profiles", {})[name] = profile
+if isinstance(data.get("desktops"), dict) and isinstance(data["desktops"].get(name), dict):
+    data["desktops"][name]["gvt_profile"] = profile
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+PY
+            ;;
+    esac
+}
+
 remove_vm_mdev() {
     load_config
     local uuid
@@ -279,34 +401,55 @@ ensure_mdev_for_vm() {
     local name=$1
     local uuid
     local profile
+    local requested
     local type_dir
     local create
     uuid=$(vm_uuid "$name")
-    profile=$(vm_profile "$name")
-    type_dir="$MDEV_PARENT/mdev_supported_types/$profile"
-    create="$type_dir/create"
-
-    if [ ! -d "$type_dir" ] || [ ! -e "$create" ]; then
-        echo "$name selected unavailable GVT-g profile $profile" >&2
-        exit 3
-    fi
+    requested=$(vm_profile "$name")
 
     if [ -e "/sys/bus/mdev/devices/$uuid" ]; then
         local current
         current=$(current_mdev_type "$uuid")
-        if [ "$current" = "$profile" ]; then
+        if [ "$current" = "$requested" ]; then
+            return
+        fi
+        if [ "$(select_available_profile "$requested")" != "$requested" ] &&
+            [ -n "$current" ] &&
+            [ -d "$MDEV_PARENT/mdev_supported_types/$current" ]; then
+            echo "$name requested GVT-g profile $requested but no instance is available; keeping existing $current" >&2
+            persist_vm_profile "$name" "$current"
             return
         fi
         if [ -n "$(qemu_pids_for_vm "$name")" ]; then
-            echo "$name is running; cannot switch GVT-g profile from $current to $profile" >&2
+            echo "$name is running; cannot switch GVT-g profile from $current to $requested" >&2
             exit 4
         fi
         remove_mdev_if_present "$uuid"
         sleep 1
     fi
 
+    if [ -z "$(select_available_profile "$requested")" ]; then
+        reclaim_idle_mdevs "$uuid"
+        sleep 1
+    fi
+    profile=$(select_available_profile "$requested")
+    if [ -z "$profile" ]; then
+        echo "$name cannot start: no available GVT-g instance; requested profile $requested" >&2
+        exit 5
+    fi
+    if [ "$profile" != "$requested" ]; then
+        echo "$name requested GVT-g profile $requested but no instance is available; using $profile" >&2
+        persist_vm_profile "$name" "$profile"
+    fi
+    type_dir="$MDEV_PARENT/mdev_supported_types/$profile"
+    create="$type_dir/create"
+    if [ ! -d "$type_dir" ] || [ ! -e "$create" ]; then
+        echo "$name selected unavailable GVT-g profile $profile" >&2
+        exit 3
+    fi
+
     local available
-    available=$(cat "$type_dir/available_instances" 2>/dev/null || echo 0)
+    available=$(profile_available_instances "$profile")
     if [ "${available:-0}" -le 0 ]; then
         echo "$name cannot start: no available instance for GVT-g profile $profile" >&2
         exit 5
