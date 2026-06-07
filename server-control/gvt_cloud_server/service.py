@@ -67,11 +67,13 @@ class GvtCloudService:
 
     def status(self) -> dict[str, Any]:
         outputd = self._outputd_summary()
+        outputd_status_valid = not outputd.get("error")
+        active_source = str(outputd.get("active") or "") if outputd_status_valid else str(self._state.get("output_source", ""))
         return {
             "version": __version__,
             "host": self._host_summary(),
             "outputd": outputd,
-            "active_source": outputd.get("active") or self._state.get("output_source", ""),
+            "active_source": active_source,
             "input_source": self._state.get("input_source", ""),
             "audio_source": self._state.get("audio_source", ""),
             "desktops": self.desktops(),
@@ -140,6 +142,10 @@ class GvtCloudService:
         result = self._run("desktop_stop", id=desktop.id)
         if self.runtime.pid_status(desktop)[1]:
             raise ApiError(500, f"{desktop.id} is still running after stop command")
+        self.runtime.remove_output(desktop.id)
+        if self._state.get("output_source") == desktop.id:
+            self._state["output_source"] = ""
+            self._save_state()
         return self._with_command(self.desktop(desktop.id), result)
 
     def restart_desktop(self, desktop_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -326,10 +332,22 @@ class GvtCloudService:
     def _outputd_summary(self) -> dict[str, Any]:
         status = self.runtime.outputd_status()
         sources = status.get("sources") if isinstance(status.get("sources"), list) else []
+        active_name = str(status.get("active", ""))
+        active_source = next(
+            (item for item in sources if isinstance(item, dict) and item.get("name") == active_name),
+            None,
+        )
+        source_resolution = ""
+        if active_source and active_source.get("width") and active_source.get("height"):
+            source_resolution = f"{active_source.get('width')}x{active_source.get('height')}"
+        physical_mode = str(status.get("mode", ""))
         return {
-            "active": status.get("active", ""),
+            "active": active_name,
             "connector": status.get("connector", ""),
-            "mode": status.get("mode", ""),
+            "mode": source_resolution or physical_mode,
+            "source_resolution": source_resolution,
+            "physical_mode": physical_mode,
+            "active_source": active_source or {},
             "failed": status.get("failed", 0),
             "cursor": status.get("cursor", {}),
             "received": status.get("received", 0),

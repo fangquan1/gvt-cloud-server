@@ -16,6 +16,7 @@ from .config import DesktopConfig, RuntimeConfig, ServerConfig
 MAGIC = 0x4756544F
 VERSION = 1
 MSG_SELECT = 2
+MSG_REMOVE = 3
 SOURCE_LEN = 32
 MDEV_PARENT = Path("/sys/devices/pci0000:00/0000:00:02.0")
 
@@ -195,13 +196,23 @@ class ControlRuntime:
             return 0
 
     def select_output(self, source: str) -> None:
+        self._send_outputd_message(MSG_SELECT, source)
+
+    def remove_output(self, source: str) -> None:
+        self._send_outputd_message(MSG_REMOVE, source)
+
+    def _send_outputd_message(self, msg_type: int, source: str) -> None:
+        if not hasattr(socket, "AF_UNIX"):
+            return
+        if os.name != "nt" and not Path(self.config.runtime.outputd_socket).exists():
+            return
         source_bytes = source.encode("ascii", "ignore")[: SOURCE_LEN - 1]
         source_bytes += b"\0" * (SOURCE_LEN - len(source_bytes))
         msg = struct.pack(
             "<IIIIIIIIQQ32s",
             MAGIC,
             VERSION,
-            MSG_SELECT,
+            msg_type,
             0,
             0,
             0,

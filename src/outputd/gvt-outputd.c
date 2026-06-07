@@ -30,6 +30,7 @@
 #define GVT_OUTPUTD_VERSION 1
 #define GVT_OUTPUTD_MSG_FRAME 1
 #define GVT_OUTPUTD_MSG_SELECT 2
+#define GVT_OUTPUTD_MSG_REMOVE 3
 #define GVT_OUTPUTD_MSG_CURSOR_POS 4
 #define GVT_OUTPUTD_SOURCE_LEN 32
 #define GVT_OUTPUTD_MAX_SOURCES 8
@@ -417,6 +418,15 @@ static bool atomic_add(drmModeAtomicReq *req, uint32_t obj, uint32_t prop,
     return drmModeAtomicAddProperty(req, obj, prop, value) >= 0;
 }
 
+static void hide_cursor(KmsState *kms)
+{
+    if (!kms->ready || kms->fd < 0 || !kms->cursor_visible) {
+        return;
+    }
+    drmModeSetCursor(kms->fd, kms->crtc_id, 0, 0, 0);
+    kms->cursor_visible = false;
+}
+
 static void draw_cursor(uint32_t *pixels, uint32_t width, uint32_t height)
 {
     static const char *shape[] = {
@@ -466,8 +476,17 @@ static bool ensure_cursor(KmsState *kms)
     struct drm_mode_destroy_dumb destroy = { 0 };
     uint32_t *pixels;
 
-    if (kms->cursor_ready) {
+    if (kms->cursor_ready && kms->cursor_visible) {
         return true;
+    }
+    if (kms->cursor_ready) {
+        if (drmModeSetCursor2(kms->fd, kms->crtc_id, kms->cursor_handle,
+                              kms->cursor_width, kms->cursor_height,
+                              0, 0) == 0) {
+            kms->cursor_visible = true;
+            return true;
+        }
+        return false;
     }
     if (kms->fd < 0 || !kms->crtc_id) {
         return false;
@@ -603,6 +622,48 @@ static bool present_source(Daemon *d, Source *src)
 
 static void write_status(Daemon *d);
 
+static bool clear_output(Daemon *d)
+{
+    KmsState *kms = &d->kms;
+    drmModeAtomicReq *req;
+    bool ok;
+
+    if (!kms->ready || kms->fd < 0 || !kms->active) {
+        hide_cursor(kms);
+        d->presented++;
+        return true;
+    }
+
+    req = drmModeAtomicAlloc();
+    if (!req) {
+        d->failed++;
+        return false;
+    }
+    ok = atomic_add(req, kms->primary_plane_id, kms->plane_fb_id_prop, 0) &&
+         atomic_add(req, kms->primary_plane_id, kms->plane_crtc_id_prop, 0);
+    if (ok && drmModeAtomicCommit(kms->fd, req, 0, NULL) == 0) {
+        hide_cursor(kms);
+        kms->active = false;
+        d->presented++;
+        ok = true;
+    } else {
+        int saved_errno = errno;
+        if (drmModeSetCrtc(kms->fd, kms->crtc_id, 0, 0, 0, NULL, 0, NULL) == 0) {
+            hide_cursor(kms);
+            kms->active = false;
+            d->presented++;
+            ok = true;
+        } else {
+            fprintf(stderr, "gvt-outputd: clear output failed errno=%d (%s)\n",
+                    saved_errno, strerror(saved_errno));
+            d->failed++;
+            ok = false;
+        }
+    }
+    drmModeAtomicFree(req);
+    return ok;
+}
+
 static Source *get_source(Daemon *d, const char *name)
 {
     Source *empty = NULL;
@@ -622,6 +683,16 @@ static Source *get_source(Daemon *d, const char *name)
     snprintf(empty->name, sizeof(empty->name), "%s", name);
     empty->seen = true;
     return empty;
+}
+
+static Source *find_source(Daemon *d, const char *name)
+{
+    for (int i = 0; i < GVT_OUTPUTD_MAX_SOURCES; i++) {
+        if (d->sources[i].seen && !strcmp(d->sources[i].name, name)) {
+            return &d->sources[i];
+        }
+    }
+    return NULL;
 }
 
 static void handle_frame(Daemon *d, GVTOutputdFrameMsg *msg, int fd)
@@ -752,6 +823,28 @@ static void select_source(Daemon *d, const char *name)
     write_status(d);
 }
 
+static void remove_source(Daemon *d, const char *name)
+{
+    Source *src = find_source(d, name);
+    bool was_active;
+
+    if (!src) {
+        return;
+    }
+    was_active = d->active == src;
+    fprintf(stderr, "gvt-outputd: remove source=%s active=%d fb=%u\n",
+            src->name, was_active, src->fb_id);
+    if (src->fb_id && d->kms.fd >= 0) {
+        drmModeRmFB(d->kms.fd, src->fb_id);
+    }
+    memset(src, 0, sizeof(*src));
+    if (was_active) {
+        d->active = NULL;
+        clear_output(d);
+    }
+    write_status(d);
+}
+
 static void write_status(Daemon *d)
 {
     char tmp[320];
@@ -859,6 +952,11 @@ static void recv_one(Daemon *d)
     msg.source[GVT_OUTPUTD_SOURCE_LEN - 1] = 0;
     if (msg.type == GVT_OUTPUTD_MSG_SELECT) {
         select_source(d, msg.source);
+    } else if (msg.type == GVT_OUTPUTD_MSG_REMOVE) {
+        remove_source(d, msg.source);
+        if (fd >= 0) {
+            close(fd);
+        }
     } else if (msg.type == GVT_OUTPUTD_MSG_CURSOR_POS) {
         handle_cursor_pos(d, &msg);
         if (fd >= 0) {

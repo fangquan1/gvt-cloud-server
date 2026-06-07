@@ -124,6 +124,7 @@ PY
         fi
     fi
     rm -f "$pidfile" "$qmp" "$DIR/$name-monitor.sock"
+    remove_source "$name"
     remove_vm_mdev "$name"
 }
 
@@ -793,6 +794,28 @@ import sys
 magic = 0x4756544f
 version = 1
 msg_type = 2
+source = sys.argv[2].encode("ascii", "ignore")[:31]
+source = source + b"\0" * (32 - len(source))
+msg = struct.pack("<IIIIIIIIQQ32s", magic, version, msg_type,
+                  0, 0, 0, 0, 0, 0, 0, source)
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    sock.sendto(msg, sys.argv[1])
+PY
+}
+
+remove_source() {
+    local source=${1:-}
+    if [ -z "$source" ] || [ ! -S "$OUTPUTD_SOCK" ]; then
+        return
+    fi
+    python3 - "$OUTPUTD_SOCK" "$source" <<'PY' || true
+import socket
+import struct
+import sys
+
+magic = 0x4756544f
+version = 1
+msg_type = 3
 source = sys.argv[2].encode("ascii", "ignore")[:31]
 source = source + b"\0" * (32 - len(source))
 msg = struct.pack("<IIIIIIIIQQ32s", magic, version, msg_type,
