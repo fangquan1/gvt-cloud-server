@@ -741,6 +741,7 @@ start_one() {
         export GST_PLUGIN_SYSTEM_PATH_1_0=/usr/local/lib64/gstreamer-1.0:/usr/lib64/gstreamer-1.0
         export LIBVA_DRIVER_NAME=iHD
         export LIBVA_DRIVERS_PATH=/usr/lib64/dri:/usr/local/lib64/dri
+        export GST_VAAPI_ALL_DRIVERS=1
         export GVT_STREAM_REFRESH_MS=16
         export GVT_STREAM_REPORT_MS=1000
         export GVT_STREAM_VERBOSE=0
