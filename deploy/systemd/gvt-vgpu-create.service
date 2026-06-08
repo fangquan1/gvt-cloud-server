@@ -1,0 +1,11 @@
+[Unit]
+Description=Create Intel GVT-g mediated vGPU devices
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /root/qemu_cmd/create-gvt-vgpus.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

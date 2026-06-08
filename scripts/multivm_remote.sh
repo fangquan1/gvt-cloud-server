@@ -151,6 +151,17 @@ stream_target_matches() {
     local name=$1
     local host=$2
     local port=$3
+    local pid
+    local env_host
+    local env_port
+    for pid in $(qemu_pids_for_vm "$name"); do
+        env_host=$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | sed -n 's/^GVT_STREAM_RTP_HOST=//p' | tail -1 || true)
+        env_port=$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | sed -n 's/^GVT_STREAM_RTP_PORT=//p' | tail -1 || true)
+        if [ "$env_host" = "$host" ] && [ "$env_port" = "$port" ]; then
+            return 0
+        fi
+    done
+
     local log="$DIR/$name.log"
     local line
     line=$(grep -E 'gvt-stream: init host=' "$log" 2>/dev/null | tail -1 || true)
@@ -684,10 +695,13 @@ start_one() {
     local upper
     local mode_var
     local vm_mode
+    local meta_mode
     local vcpus_var
     local memory_var
     local vcpus
+    local meta_vcpus
     local memory_mib
+    local meta_memory_mib
 
     if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
         echo "$name already running pid=$(cat "$pidfile")"
@@ -696,18 +710,27 @@ start_one() {
 
     setup_tap "$tap"
     rm -f "$qmp" "$mon"
-    vm_mode="${VM_MODE:-realtime}"
-    vcpus="${VM_VCPUS:-4}"
-    memory_mib="${VM_MEMORY_MIB:-4096}"
+    meta_mode="${VM_MODE:-}"
+    meta_vcpus="${VM_VCPUS:-}"
+    meta_memory_mib="${VM_MEMORY_MIB:-}"
+    vm_mode="${meta_mode:-realtime}"
+    vcpus="${meta_vcpus:-4}"
+    memory_mib="${meta_memory_mib:-4096}"
     case "$name" in
         vm1|vm2)
             upper=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')
             mode_var="${upper}_MODE"
             vcpus_var="${upper}_VCPUS"
             memory_var="${upper}_MEMORY_MIB"
-            vm_mode="${!mode_var:-$vm_mode}"
-            vcpus="${!vcpus_var:-$vcpus}"
-            memory_mib="${!memory_var:-$memory_mib}"
+            if [ -z "$meta_mode" ]; then
+                vm_mode="${!mode_var:-$vm_mode}"
+            fi
+            if [ -z "$meta_vcpus" ]; then
+                vcpus="${!vcpus_var:-$vcpus}"
+            fi
+            if [ -z "$meta_memory_mib" ]; then
+                memory_mib="${!memory_var:-$memory_mib}"
+            fi
             ;;
     esac
     ensure_mdev_for_vm "$name"

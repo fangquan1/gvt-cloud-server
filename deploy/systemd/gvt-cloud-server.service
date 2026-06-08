@@ -1,0 +1,16 @@
+[Unit]
+Description=GVT Cloud Server API
+After=network-online.target gvt-vgpu-create.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/usr/local/src/project/gvt-cloud-server
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/usr/local/src/project/gvt-cloud-server/server-control
+ExecStart=/usr/bin/python3 -m gvt_cloud_server --config /etc/gvt-cloud-server/config.json
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
