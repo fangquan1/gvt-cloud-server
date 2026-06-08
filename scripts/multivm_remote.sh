@@ -14,10 +14,10 @@ WEB_SCRIPT="$DIR/gvt-output-web.py"
 WEB_LOG="$DIR/gvt-output-web.log"
 WEB_PID="$DIR/gvt-output-web.pid"
 WEB_PORT=${GVT_MULTI_WEB_PORT:-8098}
-BASE_DISK=/root/qemu_cmd/archive/gvtg-spice-net-audio-20260530-1209/win10-gvtg-spice-net-audio.qcow2
+BASE_DISK=${GVT_BASE_DISK:-/root/vm/win10.qcow2}
 MDEV_PARENT=/sys/devices/pci0000:00/0000:00:02.0
 MDEV_TYPE=i915-GVTg_V5_8
-QEMU_BIN=/usr/local/src/project/qemu/build/qemu-system-x86_64
+QEMU_BIN=/usr/local/bin/qemu-system-x86_64
 BR_IF=br0
 
 mkdir -p "$DIR"
@@ -1083,9 +1083,6 @@ start_vm() {
         echo "unknown desktop $name" >&2
         exit 2
     fi
-    case "$name" in
-        vm1|vm2) create_overlays ;;
-    esac
     eval "$(load_vm_meta "$name")"
     vm_mode="$VM_MODE"
     if [ -n "$client_host" ] && [ "$vm_mode" != "physical" ] && [ -n "$(qemu_pids_for_vm "$name")" ]; then
