@@ -53,6 +53,12 @@ ensure_config_defaults() {
     if ! grep -q '^VM2_PROFILE=' "$CONFIG" 2>/dev/null; then
         printf 'VM2_PROFILE=%s\n' "$MDEV_TYPE" >>"$CONFIG"
     fi
+    if ! grep -q '^VM1_MODE=' "$CONFIG" 2>/dev/null; then
+        printf 'VM1_MODE=realtime\n' >>"$CONFIG"
+    fi
+    if ! grep -q '^VM2_MODE=' "$CONFIG" 2>/dev/null; then
+        printf 'VM2_MODE=realtime\n' >>"$CONFIG"
+    fi
     if ! grep -q '^VM1_VCPUS=' "$CONFIG" 2>/dev/null; then
         printf 'VM1_VCPUS=4\n' >>"$CONFIG"
     fi
@@ -158,7 +164,20 @@ stream_target_matches() {
 load_vm_meta() {
     local name=$1
     load_config
-    python3 - "$STATE" "$DIR" "$name" <<'PY'
+    VM1_UUID="${VM1_UUID:-}" \
+        VM2_UUID="${VM2_UUID:-}" \
+        VM1_PROFILE="${VM1_PROFILE:-}" \
+        VM2_PROFILE="${VM2_PROFILE:-}" \
+        VM1_MODE="${VM1_MODE:-}" \
+        VM2_MODE="${VM2_MODE:-}" \
+        VM1_VCPUS="${VM1_VCPUS:-}" \
+        VM2_VCPUS="${VM2_VCPUS:-}" \
+        VM1_MEMORY_MIB="${VM1_MEMORY_MIB:-}" \
+        VM2_MEMORY_MIB="${VM2_MEMORY_MIB:-}" \
+        VM1_INSTALL_ISO="${VM1_INSTALL_ISO:-}" \
+        VM2_INSTALL_ISO="${VM2_INSTALL_ISO:-}" \
+        MDEV_TYPE="${MDEV_TYPE:-i915-GVTg_V5_8}" \
+        python3 - "$STATE" "$DIR" "$name" <<'PY'
 import json
 import os
 import pathlib
@@ -184,7 +203,7 @@ defaults = {
     "vm1": {
         "uuid": os.environ.get("VM1_UUID", ""),
         "profile": os.environ.get("VM1_PROFILE", os.environ.get("MDEV_TYPE", "i915-GVTg_V5_8")),
-        "mode": os.environ.get("VM1_MODE", "physical"),
+        "mode": os.environ.get("VM1_MODE", "realtime"),
         "vcpus": os.environ.get("VM1_VCPUS", "4"),
         "memory_mib": os.environ.get("VM1_MEMORY_MIB", "4096"),
         "disk": str(root / "win10-vm1.qcow2"),
@@ -198,7 +217,7 @@ defaults = {
     "vm2": {
         "uuid": os.environ.get("VM2_UUID", ""),
         "profile": os.environ.get("VM2_PROFILE", os.environ.get("MDEV_TYPE", "i915-GVTg_V5_8")),
-        "mode": os.environ.get("VM2_MODE", "physical"),
+        "mode": os.environ.get("VM2_MODE", "realtime"),
         "vcpus": os.environ.get("VM2_VCPUS", "4"),
         "memory_mib": os.environ.get("VM2_MEMORY_MIB", "4096"),
         "disk": str(root / "win10-vm2.qcow2"),
@@ -420,6 +439,13 @@ ensure_mdev_for_vm() {
     local create
     uuid=$(vm_uuid "$name")
     requested=$(vm_profile "$name")
+    case "$uuid" in
+        ????????-????-????-????-????????????) ;;
+        *)
+            echo "$name cannot start: invalid or missing mdev UUID '$uuid'" >&2
+            exit 6
+            ;;
+    esac
 
     if [ -e "/sys/bus/mdev/devices/$uuid" ]; then
         local current
@@ -670,7 +696,7 @@ start_one() {
 
     setup_tap "$tap"
     rm -f "$qmp" "$mon"
-    vm_mode="${VM_MODE:-physical}"
+    vm_mode="${VM_MODE:-realtime}"
     vcpus="${VM_VCPUS:-4}"
     memory_mib="${VM_MEMORY_MIB:-4096}"
     case "$name" in
@@ -726,7 +752,7 @@ start_one() {
                 export GVT_STREAM_IDLE_AFTER_MS=1500
                 export GVT_STREAM_IDLE_PROBE_MS=500
                 ;;
-            physical|"")
+        physical)
                 export GVT_STREAM_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_AFTER_MS=0
@@ -769,12 +795,20 @@ start_one() {
             -device vfio-pci-nohotplug,sysfsdev="/sys/bus/pci/devices/0000:00:02.0/$uuid",display=on,x-igd-opregion=on,ramfb=on
         )
         if [ -n "$install_iso" ]; then
-            boot_args=(-boot order=d -cdrom "$install_iso")
+            boot_args=(-boot menu=on,strict=on,order=d -cdrom "$install_iso")
             display_args=(-display none)
             spice_args=(
                 -spice port="$spice_port",addr=0.0.0.0,disable-ticketing=on,agent-mouse=on,playback-compression=off,streaming-video=off,image-compression=off,disable-copy-paste=on,disable-agent-file-xfer=on
             )
-            install_display_args=(-device qxl-vga)
+            # The Windows installer must show BIOS/ISO prompts before any guest
+            # driver exists, so prefer the simplest VGA surface over the normal
+            # gvt-stream/vGPU path. QXL remains available for ad-hoc testing via
+            # GVT_INSTALL_DISPLAY=qxl.
+            if [ "${GVT_INSTALL_DISPLAY:-vga}" = "qxl" ]; then
+                install_display_args=(-device qxl-vga,ram_size=67108864,vram_size=67108864,vgamem_mb=64)
+            else
+                install_display_args=(-device VGA,vgamem_mb=32)
+            fi
             vfio_args=()
         fi
 
@@ -1027,10 +1061,10 @@ start_all() {
         echo "using KMS connector $connector for vm1"
     fi
     start_outputd "$connector"
-    if [ "${VM1_MODE:-physical}" = "physical" ]; then
+    if [ "${VM1_MODE:-realtime}" = "physical" ]; then
         vm1_connector="$connector"
     fi
-    if [ "${VM2_MODE:-physical}" = "physical" ]; then
+    if [ "${VM2_MODE:-realtime}" = "physical" ]; then
         vm2_connector="$connector"
     fi
 
@@ -1193,9 +1227,13 @@ status_all() {
         cat "$path" 2>/dev/null || true
     done
     echo "--- vm1 log ---"
-    grep -nE 'gvt-stream: (listener|scanout-dmabuf|update-stats)|gvt-stream-kms|failed|error' "$DIR/vm1.log" 2>/dev/null | tail -50 || true
+    tail -400 "$DIR/vm1.log" 2>/dev/null |
+        grep -nE 'gvt-stream: (listener|scanout-dmabuf|update-stats)|gvt-stream-kms|failed|error' |
+        tail -50 || true
     echo "--- vm2 log ---"
-    grep -nE 'gvt-stream: (listener|scanout-dmabuf|update-stats)|gvt-stream-kms|failed|error' "$DIR/vm2.log" 2>/dev/null | tail -50 || true
+    tail -400 "$DIR/vm2.log" 2>/dev/null |
+        grep -nE 'gvt-stream: (listener|scanout-dmabuf|update-stats)|gvt-stream-kms|failed|error' |
+        tail -50 || true
     echo "--- memory ---"
     free -h
 }
