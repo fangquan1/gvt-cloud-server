@@ -174,7 +174,7 @@ def config_from_dict(data: dict[str, Any]) -> ServerConfig:
     desktops_data = data.get("desktops")
     desktops = (
         tuple(_desktop_from_dict(item, root_dir) for item in desktops_data)
-        if isinstance(desktops_data, list)
+        if isinstance(desktops_data, list) and desktops_data
         else default_desktops(root_dir)
     )
     commands = data.get("commands") if isinstance(data.get("commands"), dict) else default_commands(root_dir)

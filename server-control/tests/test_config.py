@@ -28,6 +28,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.desktops[0].pid_file, "/tmp/gvt/vm1.pid")
         self.assertEqual(config.commands["output_select"][0], "/tmp/gvt/multivm_remote.sh")
 
+    def test_empty_desktops_uses_default_baseline(self) -> None:
+        config = config_from_dict({"desktops": []})
+        self.assertEqual([desktop.id for desktop in config.desktops], ["vm1", "vm2"])
+
 
 if __name__ == "__main__":
     unittest.main()
