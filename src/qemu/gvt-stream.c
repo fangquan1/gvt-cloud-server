@@ -2252,6 +2252,50 @@ static void gvt_stream_encoder_finish(GVTStreamDisplay *gdpy)
                  gdpy->encode_count, gdpy->encode_file ?: gdpy->rtp_host);
 }
 
+static void gvt_stream_encoder_poll_bus(GVTStreamDisplay *gdpy)
+{
+    GstBus *bus;
+    GstMessage *msg;
+
+    if (!gdpy->encode_pipeline) {
+        return;
+    }
+
+    bus = gst_element_get_bus(gdpy->encode_pipeline);
+    while ((msg = gst_bus_pop_filtered(bus,
+                                       GST_MESSAGE_ERROR |
+                                       GST_MESSAGE_WARNING |
+                                       GST_MESSAGE_EOS))) {
+        if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ERROR) {
+            GError *err = NULL;
+            gchar *debug = NULL;
+
+            gdpy->encode_fail_count++;
+            gst_message_parse_error(msg, &err, &debug);
+            error_report("gvt-stream: encode-bus-error from=%s message=%s debug=%s",
+                         GST_OBJECT_NAME(msg->src),
+                         err ? err->message : "unknown", debug ? debug : "");
+            g_clear_error(&err);
+            g_free(debug);
+        } else if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_WARNING) {
+            GError *err = NULL;
+            gchar *debug = NULL;
+
+            gst_message_parse_warning(msg, &err, &debug);
+            warn_report("gvt-stream: encode-bus-warning from=%s message=%s debug=%s",
+                        GST_OBJECT_NAME(msg->src),
+                        err ? err->message : "unknown", debug ? debug : "");
+            g_clear_error(&err);
+            g_free(debug);
+        } else {
+            warn_report("gvt-stream: encode-bus-eos target=%s",
+                        gdpy->encode_file ?: gdpy->rtp_host);
+        }
+        gst_message_unref(msg);
+    }
+    gst_object_unref(bus);
+}
+
 static void gvt_stream_stamp_buffer(GVTStreamDisplay *gdpy, GstBuffer *buf,
                                     int64_t now_ms)
 {
@@ -2288,8 +2332,8 @@ static void gvt_stream_encoder_push_dmabuf(GVTStreamDisplay *gdpy,
     int n_fds = 0, n_offsets = 0, n_strides = 0;
     int fd;
     uint32_t width, height, fourcc, stride, offset;
-    gsize plane_offsets[1];
-    gint plane_strides[1];
+    gsize plane_offsets[GST_VIDEO_MAX_PLANES] = { 0 };
+    gint plane_strides[GST_VIDEO_MAX_PLANES] = { 0 };
     size_t size;
 
     if ((!gdpy->encode_file && !(gdpy->rtp_host && gdpy->rtp_port)) || !dmabuf) {
@@ -2359,6 +2403,7 @@ static void gvt_stream_encoder_push_dmabuf(GVTStreamDisplay *gdpy,
     gvt_stream_stamp_buffer(gdpy, buf, now_ms);
 
     flow = gst_app_src_push_buffer(GST_APP_SRC(gdpy->encode_appsrc), buf);
+    gvt_stream_encoder_poll_bus(gdpy);
     if (flow != GST_FLOW_OK) {
         gdpy->encode_fail_count++;
         error_report("gvt-stream: dmabuf-push-failed flow=%s",
@@ -2432,6 +2477,7 @@ static void gvt_stream_encoder_push(GVTStreamDisplay *gdpy, int64_t now_ms)
     gvt_stream_stamp_buffer(gdpy, buf, now_ms);
 
     flow = gst_app_src_push_buffer(GST_APP_SRC(gdpy->encode_appsrc), buf);
+    gvt_stream_encoder_poll_bus(gdpy);
     if (flow != GST_FLOW_OK) {
         gdpy->encode_fail_count++;
         error_report("gvt-stream: encode-push-failed flow=%s",
