@@ -108,6 +108,7 @@ typedef struct GVTStreamDisplay {
     uint64_t encode_cpu_count;
     GstElement *encode_pipeline;
     GstElement *encode_appsrc;
+    char *video_codec;
     char *capture_dir;
     char *encode_file;
     char *rtp_host;
@@ -2038,6 +2039,15 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
     g_autofree char *pipeline_desc = NULL;
     GstCaps *caps;
     GstStateChangeReturn state_ret;
+    bool encode_h265 = gdpy->video_codec &&
+        !g_ascii_strcasecmp(gdpy->video_codec, "h265");
+    const char *encoder = encode_h265 ? "vaapih265enc" : "vaapih264enc";
+    const char *encoder_opts = encode_h265 ?
+        "max-bframes=0 refs=1 " :
+        "max-bframes=0 refs=1 cabac=false aud=true ";
+    const char *parser = encode_h265 ? "h265parse" : "h264parse";
+    const char *payloader = encode_h265 ? "rtph265pay" : "rtph264pay";
+    const char *raw_caps = encode_h265 ? "video/x-h265" : "video/x-h264";
 
     if (!gdpy->encode_file && !(gdpy->rtp_host && gdpy->rtp_port)) {
         return false;
@@ -2055,13 +2065,14 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
                 "appsrc name=src is-live=true format=time do-timestamp=false block=false "
                 "! queue leaky=downstream max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
                 "! videoconvert ! video/x-raw,format=NV12 "
-                "! vaapih265enc rate-control=cbr bitrate=%d keyframe-period=%d "
-                "max-bframes=0 refs=1 "
-                "! h265parse config-interval=1 "
-                "! rtph265pay pt=96 ssrc=2222 config-interval=1 mtu=1000 "
+                "! %s rate-control=cbr bitrate=%d keyframe-period=%d "
+                "%s"
+                "! %s config-interval=1 "
+                "! %s pt=96 ssrc=2222 config-interval=1 mtu=1000 "
                 "! rtpulpfecenc pt=122 percentage=%u percentage-important=%u multipacket=true "
                 "! udpsink host=%s port=%u sync=false async=false",
-                gdpy->encode_bitrate, gdpy->encode_keyint,
+                encoder, gdpy->encode_bitrate, gdpy->encode_keyint,
+                encoder_opts, parser, payloader,
                 (unsigned)gdpy->rtp_fec, (unsigned)gdpy->rtp_fec_important,
                 gdpy->rtp_host, (unsigned)gdpy->rtp_port);
         } else if (gdpy->rtp_host && gdpy->rtp_port) {
@@ -2069,24 +2080,26 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
                 "appsrc name=src is-live=true format=time do-timestamp=false block=false "
                 "! queue leaky=downstream max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
                 "! videoconvert ! video/x-raw,format=NV12 "
-                "! vaapih265enc rate-control=cbr bitrate=%d keyframe-period=%d "
-                "max-bframes=0 refs=1 "
-                "! h265parse config-interval=1 "
-                "! rtph265pay pt=96 ssrc=2222 config-interval=1 mtu=1000 "
+                "! %s rate-control=cbr bitrate=%d keyframe-period=%d "
+                "%s"
+                "! %s config-interval=1 "
+                "! %s pt=96 ssrc=2222 config-interval=1 mtu=1000 "
                 "! udpsink host=%s port=%u sync=false async=false",
-                gdpy->encode_bitrate, gdpy->encode_keyint,
+                encoder, gdpy->encode_bitrate, gdpy->encode_keyint,
+                encoder_opts, parser, payloader,
                 gdpy->rtp_host, (unsigned)gdpy->rtp_port);
         } else {
             pipeline_desc = g_strdup_printf(
                 "appsrc name=src is-live=true format=time do-timestamp=false block=false "
                 "! queue leaky=downstream max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
                 "! videoconvert ! video/x-raw,format=NV12 "
-                "! vaapih265enc rate-control=cbr bitrate=%d keyframe-period=%d "
-                "max-bframes=0 refs=1 "
-                "! h265parse config-interval=1 "
-                "! video/x-h265,stream-format=byte-stream,alignment=au "
+                "! %s rate-control=cbr bitrate=%d keyframe-period=%d "
+                "%s"
+                "! %s config-interval=1 "
+                "! %s,stream-format=byte-stream,alignment=au "
                 "! filesink location=%s sync=false async=false",
-                gdpy->encode_bitrate, gdpy->encode_keyint, gdpy->encode_file);
+                encoder, gdpy->encode_bitrate, gdpy->encode_keyint,
+                encoder_opts, parser, raw_caps, gdpy->encode_file);
         }
     } else if (gdpy->rtp_host && gdpy->rtp_port &&
         (gdpy->rtp_fec || gdpy->rtp_fec_important)) {
@@ -2095,13 +2108,14 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
             "! queue leaky=downstream max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
             "! vaapipostproc format=nv12 scale-method=fast "
             "! video/x-raw(memory:VASurface),format=NV12 "
-            "! vaapih265enc rate-control=cbr bitrate=%d keyframe-period=%d "
-            "max-bframes=0 refs=1 "
-            "! h265parse config-interval=1 "
-            "! rtph265pay pt=96 ssrc=2222 config-interval=1 mtu=1000 "
+            "! %s rate-control=cbr bitrate=%d keyframe-period=%d "
+            "%s"
+            "! %s config-interval=1 "
+            "! %s pt=96 ssrc=2222 config-interval=1 mtu=1000 "
             "! rtpulpfecenc pt=122 percentage=%u percentage-important=%u multipacket=true "
             "! udpsink host=%s port=%u sync=false async=false",
-            gdpy->encode_bitrate, gdpy->encode_keyint,
+            encoder, gdpy->encode_bitrate, gdpy->encode_keyint,
+            encoder_opts, parser, payloader,
             (unsigned)gdpy->rtp_fec, (unsigned)gdpy->rtp_fec_important,
             gdpy->rtp_host, (unsigned)gdpy->rtp_port);
     } else if (gdpy->rtp_host && gdpy->rtp_port) {
@@ -2110,12 +2124,13 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
             "! queue leaky=downstream max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
             "! vaapipostproc format=nv12 scale-method=fast "
             "! video/x-raw(memory:VASurface),format=NV12 "
-            "! vaapih265enc rate-control=cbr bitrate=%d keyframe-period=%d "
-            "max-bframes=0 refs=1 "
-            "! h265parse config-interval=1 "
-            "! rtph265pay pt=96 ssrc=2222 config-interval=1 mtu=1000 "
+            "! %s rate-control=cbr bitrate=%d keyframe-period=%d "
+            "%s"
+            "! %s config-interval=1 "
+            "! %s pt=96 ssrc=2222 config-interval=1 mtu=1000 "
             "! udpsink host=%s port=%u sync=false async=false",
-            gdpy->encode_bitrate, gdpy->encode_keyint,
+            encoder, gdpy->encode_bitrate, gdpy->encode_keyint,
+            encoder_opts, parser, payloader,
             gdpy->rtp_host, (unsigned)gdpy->rtp_port);
     } else {
         pipeline_desc = g_strdup_printf(
@@ -2123,12 +2138,13 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
             "! queue leaky=downstream max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
             "! vaapipostproc format=nv12 scale-method=fast "
             "! video/x-raw(memory:VASurface),format=NV12 "
-            "! vaapih265enc rate-control=cbr bitrate=%d keyframe-period=%d "
-            "max-bframes=0 refs=1 "
-            "! h265parse config-interval=1 "
-            "! video/x-h265,stream-format=byte-stream,alignment=au "
+            "! %s rate-control=cbr bitrate=%d keyframe-period=%d "
+            "%s"
+            "! %s config-interval=1 "
+            "! %s,stream-format=byte-stream,alignment=au "
             "! filesink location=%s sync=false async=false",
-            gdpy->encode_bitrate, gdpy->encode_keyint, gdpy->encode_file);
+            encoder, gdpy->encode_bitrate, gdpy->encode_keyint,
+            encoder_opts, parser, raw_caps, gdpy->encode_file);
     }
 
     gdpy->encode_pipeline = gst_parse_launch(pipeline_desc, &error);
@@ -2188,16 +2204,18 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
     }
 
     if (gdpy->rtp_host && gdpy->rtp_port) {
-        error_report("gvt-stream: encode-start rtp=%s:%u size=%dx%d fps=%d "
+        error_report("gvt-stream: encode-start codec=%s rtp=%s:%u size=%dx%d fps=%d "
                      "bitrate=%d keyint=%d fec=%u/%u path=%s dmabuf_caps=%d flip=%d",
+                     gdpy->video_codec,
                      gdpy->rtp_host, (unsigned)gdpy->rtp_port, width, height,
                      gdpy->encode_fps, gdpy->encode_bitrate, gdpy->encode_keyint,
                      (unsigned)gdpy->rtp_fec, (unsigned)gdpy->rtp_fec_important,
                      gdpy->encode_dmabuf ? "dmabuf" : "cpu",
                      gdpy->encode_dmabuf_caps_feature, gdpy->encode_flip);
     } else {
-        error_report("gvt-stream: encode-start file=%s size=%dx%d fps=%d "
+        error_report("gvt-stream: encode-start codec=%s file=%s size=%dx%d fps=%d "
                      "bitrate=%d keyint=%d path=%s dmabuf_caps=%d flip=%d",
+                     gdpy->video_codec,
                      gdpy->encode_file, width, height, gdpy->encode_fps,
                      gdpy->encode_bitrate, gdpy->encode_keyint,
                      gdpy->encode_dmabuf ? "dmabuf" : "cpu",
@@ -2956,6 +2974,19 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                                                      12000, 256, 100000);
         gdpy->encode_keyint = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_KEYINT",
                                                     30, 1, 300);
+        gdpy->video_codec = g_strdup(g_getenv("GVT_STREAM_VIDEO_CODEC") ?: "h265");
+        if (g_ascii_strcasecmp(gdpy->video_codec, "h264") &&
+            g_ascii_strcasecmp(gdpy->video_codec, "h265") &&
+            g_ascii_strcasecmp(gdpy->video_codec, "hevc")) {
+            warn_report("gvt-stream: unknown codec %s, falling back to h265",
+                        gdpy->video_codec);
+            g_free(gdpy->video_codec);
+            gdpy->video_codec = g_strdup("h265");
+        }
+        if (!g_ascii_strcasecmp(gdpy->video_codec, "hevc")) {
+            g_free(gdpy->video_codec);
+            gdpy->video_codec = g_strdup("h265");
+        }
         gdpy->encode_flip = gvt_stream_getenv_bool("GVT_STREAM_ENCODE_FLIP", false);
         gdpy->encode_dmabuf_caps_feature =
             gvt_stream_getenv_bool("GVT_STREAM_DMABUF_CAPS_FEATURE", false);
@@ -3028,7 +3059,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      " idle_after_ms=%" PRIu64 " idle_probe_ms=%" PRIu64
                      " idle_changed_ppm=%" PRIu64 " idle_pixel_delta=%" PRIu64
                      " capture_max=%" PRIu64
-                     " encode_file=%s encode_max=%" PRIu64 " encode_fps=%d "
+                     " encode_file=%s encode_max=%" PRIu64 " encode_fps=%d codec=%s "
                      "path=%s flip=%d dmabuf_caps=%d rtp=%s:%u kms=%s "
                      "kms_atomic=%d publish=%s source=%s",
                      qemu_console_get_index(con), gdpy->refresh_ms,
@@ -3038,7 +3069,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      gdpy->idle_probe_ms, gdpy->idle_changed_ppm,
                      gdpy->idle_pixel_delta, gdpy->capture_max,
                      gdpy->encode_file ?: "",
-                     gdpy->encode_max, gdpy->encode_fps,
+                     gdpy->encode_max, gdpy->encode_fps, gdpy->video_codec,
                      gdpy->encode_dmabuf ? "dmabuf" : "cpu",
                      gdpy->encode_flip, gdpy->encode_dmabuf_caps_feature,
                      gdpy->rtp_host ?: "", (unsigned)gdpy->rtp_port,

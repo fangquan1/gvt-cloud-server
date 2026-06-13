@@ -805,6 +805,7 @@ start_one() {
             export GVT_STREAM_ENCODE_FPS=60
             export GVT_STREAM_ENCODE_BITRATE=12000
             export GVT_STREAM_ENCODE_KEYINT=60
+            export GVT_STREAM_VIDEO_CODEC=${GVT_STREAM_VIDEO_CODEC:-h265}
         else
             unset GVT_STREAM_RTP_HOST GVT_STREAM_RTP_PORT
         fi

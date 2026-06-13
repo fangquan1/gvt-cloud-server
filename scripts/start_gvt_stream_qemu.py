@@ -135,6 +135,7 @@ export GVT_STREAM_ENCODE_MAX=0
 export GVT_STREAM_ENCODE_FPS={args.fps}
 export GVT_STREAM_ENCODE_BITRATE={args.bitrate}
 export GVT_STREAM_ENCODE_KEYINT={keyint}
+export GVT_STREAM_VIDEO_CODEC={args.video_codec}
 export GVT_AUDIO_RTP_HOST={client_host}
 export GVT_AUDIO_RTP_PORT={args.audio_port}
 export GVT_AUDIO_RTP_BITRATE={args.audio_bitrate}
@@ -181,6 +182,7 @@ def main() -> None:
     p.add_argument("--port", type=int, default=5004)
     p.add_argument("--fps", type=int, default=60)
     p.add_argument("--bitrate", type=int, default=12000)
+    p.add_argument("--video-codec", choices=["h264", "h265"], default="h265")
     p.add_argument("--keyint", type=int)
     p.add_argument("--path", choices=["dmabuf", "cpu"], default="dmabuf")
     p.add_argument("--flip", action="store_true")
