@@ -100,6 +100,8 @@ typedef struct GVTStreamDisplay {
     int64_t last_encode_wall_ms;
     int encode_fps;
     int encode_bitrate;
+    int encode_idle_bitrate;
+    int encode_current_bitrate;
     int encode_keyint;
     uint64_t rtp_port;
     uint64_t rtp_fec;
@@ -108,7 +110,9 @@ typedef struct GVTStreamDisplay {
     uint64_t encode_cpu_count;
     GstElement *encode_pipeline;
     GstElement *encode_appsrc;
+    GstElement *encode_encoder;
     char *video_codec;
+    char *encode_rate_control;
     char *capture_dir;
     char *encode_file;
     char *rtp_host;
@@ -273,6 +277,39 @@ static uint64_t gvt_stream_effective_capture_ms(GVTStreamDisplay *gdpy,
         return gdpy->capture_ms;
     }
     return gdpy->idle_capture_ms;
+}
+
+static int64_t gvt_stream_last_activity_ms(GVTStreamDisplay *gdpy)
+{
+    int64_t last_activity_ms = gdpy->last_activity_ms;
+
+    if (gdpy->last_content_change_ms > last_activity_ms) {
+        last_activity_ms = gdpy->last_content_change_ms;
+    }
+    if (gvt_stream_last_input_ms > last_activity_ms) {
+        last_activity_ms = gvt_stream_last_input_ms;
+    }
+    return last_activity_ms;
+}
+
+static bool gvt_stream_activity_is_idle(GVTStreamDisplay *gdpy,
+                                        int64_t now_ms)
+{
+    int64_t last_activity_ms = gvt_stream_last_activity_ms(gdpy);
+
+    return gdpy->idle_after_ms && last_activity_ms &&
+        now_ms - last_activity_ms > gdpy->idle_after_ms;
+}
+
+static int gvt_stream_effective_bitrate(GVTStreamDisplay *gdpy,
+                                        int64_t now_ms)
+{
+    if (gdpy->encode_idle_bitrate > 0 &&
+        gdpy->encode_idle_bitrate < gdpy->encode_bitrate &&
+        gvt_stream_activity_is_idle(gdpy, now_ms)) {
+        return gdpy->encode_idle_bitrate;
+    }
+    return gdpy->encode_bitrate;
 }
 
 static int gvt_stream_set_nonblock(int fd)
@@ -2065,13 +2102,14 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
                 "appsrc name=src is-live=true format=time do-timestamp=false block=false "
                 "! queue leaky=downstream max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
                 "! videoconvert ! video/x-raw,format=NV12 "
-                "! %s rate-control=cbr bitrate=%d keyframe-period=%d "
+                "! %s name=enc rate-control=%s bitrate=%d keyframe-period=%d "
                 "%s"
                 "! %s config-interval=1 "
                 "! %s pt=96 ssrc=2222 config-interval=1 mtu=1000 "
                 "! rtpulpfecenc pt=122 percentage=%u percentage-important=%u multipacket=true "
                 "! udpsink host=%s port=%u sync=false async=false",
-                encoder, gdpy->encode_bitrate, gdpy->encode_keyint,
+                encoder, gdpy->encode_rate_control, gdpy->encode_bitrate,
+                gdpy->encode_keyint,
                 encoder_opts, parser, payloader,
                 (unsigned)gdpy->rtp_fec, (unsigned)gdpy->rtp_fec_important,
                 gdpy->rtp_host, (unsigned)gdpy->rtp_port);
@@ -2080,12 +2118,13 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
                 "appsrc name=src is-live=true format=time do-timestamp=false block=false "
                 "! queue leaky=downstream max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
                 "! videoconvert ! video/x-raw,format=NV12 "
-                "! %s rate-control=cbr bitrate=%d keyframe-period=%d "
+                "! %s name=enc rate-control=%s bitrate=%d keyframe-period=%d "
                 "%s"
                 "! %s config-interval=1 "
                 "! %s pt=96 ssrc=2222 config-interval=1 mtu=1000 "
                 "! udpsink host=%s port=%u sync=false async=false",
-                encoder, gdpy->encode_bitrate, gdpy->encode_keyint,
+                encoder, gdpy->encode_rate_control, gdpy->encode_bitrate,
+                gdpy->encode_keyint,
                 encoder_opts, parser, payloader,
                 gdpy->rtp_host, (unsigned)gdpy->rtp_port);
         } else {
@@ -2093,12 +2132,13 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
                 "appsrc name=src is-live=true format=time do-timestamp=false block=false "
                 "! queue leaky=downstream max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
                 "! videoconvert ! video/x-raw,format=NV12 "
-                "! %s rate-control=cbr bitrate=%d keyframe-period=%d "
+                "! %s name=enc rate-control=%s bitrate=%d keyframe-period=%d "
                 "%s"
                 "! %s config-interval=1 "
                 "! %s,stream-format=byte-stream,alignment=au "
                 "! filesink location=%s sync=false async=false",
-                encoder, gdpy->encode_bitrate, gdpy->encode_keyint,
+                encoder, gdpy->encode_rate_control, gdpy->encode_bitrate,
+                gdpy->encode_keyint,
                 encoder_opts, parser, raw_caps, gdpy->encode_file);
         }
     } else if (gdpy->rtp_host && gdpy->rtp_port &&
@@ -2108,13 +2148,14 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
             "! queue leaky=downstream max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
             "! vaapipostproc format=nv12 scale-method=fast "
             "! video/x-raw(memory:VASurface),format=NV12 "
-            "! %s rate-control=cbr bitrate=%d keyframe-period=%d "
+            "! %s name=enc rate-control=%s bitrate=%d keyframe-period=%d "
             "%s"
             "! %s config-interval=1 "
             "! %s pt=96 ssrc=2222 config-interval=1 mtu=1000 "
             "! rtpulpfecenc pt=122 percentage=%u percentage-important=%u multipacket=true "
             "! udpsink host=%s port=%u sync=false async=false",
-            encoder, gdpy->encode_bitrate, gdpy->encode_keyint,
+            encoder, gdpy->encode_rate_control, gdpy->encode_bitrate,
+            gdpy->encode_keyint,
             encoder_opts, parser, payloader,
             (unsigned)gdpy->rtp_fec, (unsigned)gdpy->rtp_fec_important,
             gdpy->rtp_host, (unsigned)gdpy->rtp_port);
@@ -2124,12 +2165,13 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
             "! queue leaky=downstream max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
             "! vaapipostproc format=nv12 scale-method=fast "
             "! video/x-raw(memory:VASurface),format=NV12 "
-            "! %s rate-control=cbr bitrate=%d keyframe-period=%d "
+            "! %s name=enc rate-control=%s bitrate=%d keyframe-period=%d "
             "%s"
             "! %s config-interval=1 "
             "! %s pt=96 ssrc=2222 config-interval=1 mtu=1000 "
             "! udpsink host=%s port=%u sync=false async=false",
-            encoder, gdpy->encode_bitrate, gdpy->encode_keyint,
+            encoder, gdpy->encode_rate_control, gdpy->encode_bitrate,
+            gdpy->encode_keyint,
             encoder_opts, parser, payloader,
             gdpy->rtp_host, (unsigned)gdpy->rtp_port);
     } else {
@@ -2138,12 +2180,13 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
             "! queue leaky=downstream max-size-buffers=2 max-size-time=0 max-size-bytes=0 "
             "! vaapipostproc format=nv12 scale-method=fast "
             "! video/x-raw(memory:VASurface),format=NV12 "
-            "! %s rate-control=cbr bitrate=%d keyframe-period=%d "
+            "! %s name=enc rate-control=%s bitrate=%d keyframe-period=%d "
             "%s"
             "! %s config-interval=1 "
             "! %s,stream-format=byte-stream,alignment=au "
             "! filesink location=%s sync=false async=false",
-            encoder, gdpy->encode_bitrate, gdpy->encode_keyint,
+            encoder, gdpy->encode_rate_control, gdpy->encode_bitrate,
+            gdpy->encode_keyint,
             encoder_opts, parser, raw_caps, gdpy->encode_file);
     }
 
@@ -2174,6 +2217,11 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
         gdpy->encode_pipeline = NULL;
         return false;
     }
+    gdpy->encode_encoder = gst_bin_get_by_name(GST_BIN(gdpy->encode_pipeline),
+                                               "enc");
+    if (!gdpy->encode_encoder) {
+        warn_report("gvt-stream: encode-encoder-not-found adaptive bitrate disabled");
+    }
 
     caps = gst_caps_new_simple("video/x-raw",
                                "format", G_TYPE_STRING, "BGRx",
@@ -2196,28 +2244,38 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
     if (state_ret == GST_STATE_CHANGE_FAILURE) {
         gdpy->encode_fail_count++;
         error_report("gvt-stream: encode-pipeline-start-failed");
+        if (gdpy->encode_encoder) {
+            gst_object_unref(gdpy->encode_encoder);
+            gdpy->encode_encoder = NULL;
+        }
         gst_object_unref(gdpy->encode_appsrc);
         gdpy->encode_appsrc = NULL;
         gst_object_unref(gdpy->encode_pipeline);
         gdpy->encode_pipeline = NULL;
         return false;
     }
+    gdpy->encode_current_bitrate = gdpy->encode_bitrate;
 
     if (gdpy->rtp_host && gdpy->rtp_port) {
         error_report("gvt-stream: encode-start codec=%s rtp=%s:%u size=%dx%d fps=%d "
-                     "bitrate=%d keyint=%d fec=%u/%u path=%s dmabuf_caps=%d flip=%d",
+                     "rate_control=%s bitrate=%d idle_bitrate=%d keyint=%d "
+                     "fec=%u/%u path=%s dmabuf_caps=%d flip=%d",
                      gdpy->video_codec,
                      gdpy->rtp_host, (unsigned)gdpy->rtp_port, width, height,
-                     gdpy->encode_fps, gdpy->encode_bitrate, gdpy->encode_keyint,
+                     gdpy->encode_fps, gdpy->encode_rate_control,
+                     gdpy->encode_bitrate, gdpy->encode_idle_bitrate,
+                     gdpy->encode_keyint,
                      (unsigned)gdpy->rtp_fec, (unsigned)gdpy->rtp_fec_important,
                      gdpy->encode_dmabuf ? "dmabuf" : "cpu",
                      gdpy->encode_dmabuf_caps_feature, gdpy->encode_flip);
     } else {
         error_report("gvt-stream: encode-start codec=%s file=%s size=%dx%d fps=%d "
-                     "bitrate=%d keyint=%d path=%s dmabuf_caps=%d flip=%d",
+                     "rate_control=%s bitrate=%d idle_bitrate=%d keyint=%d "
+                     "path=%s dmabuf_caps=%d flip=%d",
                      gdpy->video_codec,
                      gdpy->encode_file, width, height, gdpy->encode_fps,
-                     gdpy->encode_bitrate, gdpy->encode_keyint,
+                     gdpy->encode_rate_control, gdpy->encode_bitrate,
+                     gdpy->encode_idle_bitrate, gdpy->encode_keyint,
                      gdpy->encode_dmabuf ? "dmabuf" : "cpu",
                      gdpy->encode_dmabuf_caps_feature, gdpy->encode_flip);
     }
@@ -2262,8 +2320,12 @@ static void gvt_stream_encoder_finish(GVTStreamDisplay *gdpy)
     }
     gst_object_unref(bus);
     gst_element_set_state(gdpy->encode_pipeline, GST_STATE_NULL);
+    if (gdpy->encode_encoder) {
+        gst_object_unref(gdpy->encode_encoder);
+    }
     gst_object_unref(gdpy->encode_appsrc);
     gst_object_unref(gdpy->encode_pipeline);
+    gdpy->encode_encoder = NULL;
     gdpy->encode_appsrc = NULL;
     gdpy->encode_pipeline = NULL;
     error_report("gvt-stream: encode-finish frames=%" PRIu64 " target=%s",
@@ -2312,6 +2374,30 @@ static void gvt_stream_encoder_poll_bus(GVTStreamDisplay *gdpy)
         gst_message_unref(msg);
     }
     gst_object_unref(bus);
+}
+
+static void gvt_stream_encoder_update_bitrate(GVTStreamDisplay *gdpy,
+                                              int64_t now_ms)
+{
+    int target_bitrate;
+
+    if (!gdpy->encode_encoder) {
+        return;
+    }
+
+    target_bitrate = gvt_stream_effective_bitrate(gdpy, now_ms);
+    if (target_bitrate == gdpy->encode_current_bitrate) {
+        return;
+    }
+
+    g_object_set(gdpy->encode_encoder, "bitrate", target_bitrate, NULL);
+    gdpy->encode_current_bitrate = target_bitrate;
+    error_report("gvt-stream: encoder-bitrate-change bitrate=%d active=%d "
+                 "idle=%d capture_ms=%" PRIu64 " idle=%d",
+                 target_bitrate, gdpy->encode_bitrate,
+                 gdpy->encode_idle_bitrate,
+                 gvt_stream_effective_capture_ms(gdpy, now_ms),
+                 gvt_stream_activity_is_idle(gdpy, now_ms));
 }
 
 static void gvt_stream_stamp_buffer(GVTStreamDisplay *gdpy, GstBuffer *buf,
@@ -2418,6 +2504,7 @@ static void gvt_stream_encoder_push_dmabuf(GVTStreamDisplay *gdpy,
                                    width, height, 1,
                                    plane_offsets, plane_strides);
 
+    gvt_stream_encoder_update_bitrate(gdpy, now_ms);
     gvt_stream_stamp_buffer(gdpy, buf, now_ms);
 
     flow = gst_app_src_push_buffer(GST_APP_SRC(gdpy->encode_appsrc), buf);
@@ -2492,6 +2579,7 @@ static void gvt_stream_encoder_push(GVTStreamDisplay *gdpy, int64_t now_ms)
     }
     gst_buffer_unmap(buf, &map);
 
+    gvt_stream_encoder_update_bitrate(gdpy, now_ms);
     gvt_stream_stamp_buffer(gdpy, buf, now_ms);
 
     flow = gst_app_src_push_buffer(GST_APP_SRC(gdpy->encode_appsrc), buf);
@@ -2835,7 +2923,8 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      " imports=%" PRIu64 " import_failures=%" PRIu64
                      " captures=%" PRIu64 " capture_failures=%" PRIu64
                      " encoded=%" PRIu64 " encode_failures=%" PRIu64
-                     " dmabuf=%" PRIu64 " cpu=%" PRIu64 " capture_ms=%" PRIu64
+                     " dmabuf=%" PRIu64 " cpu=%" PRIu64
+                     " bitrate=%d target_bitrate=%d capture_ms=%" PRIu64
                      " probe_diff_ppm=%" PRIu64 " probes=%" PRIu64
                      " idle_wakes=%" PRIu64
                      " kms=%" PRIu64 "/%" PRIu64
@@ -2851,6 +2940,8 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      gdpy->capture_count, gdpy->capture_fail_count,
                      gdpy->encode_count, gdpy->encode_fail_count,
                      gdpy->encode_dmabuf_count, gdpy->encode_cpu_count,
+                     gdpy->encode_current_bitrate,
+                     gvt_stream_effective_bitrate(gdpy, now_ms),
                      gvt_stream_effective_capture_ms(gdpy, now_ms),
                       gdpy->last_probe_diff_ppm, gdpy->idle_probe_count,
                       gdpy->idle_wake_count,
@@ -2972,6 +3063,24 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                                                  30, 1, 120);
         gdpy->encode_bitrate = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_BITRATE",
                                                      12000, 256, 100000);
+        gdpy->encode_idle_bitrate =
+            gvt_stream_getenv_u64("GVT_STREAM_ENCODE_IDLE_BITRATE",
+                                  0, 0, 100000);
+        gdpy->encode_rate_control =
+            g_strdup(g_getenv("GVT_STREAM_ENCODE_RATE_CONTROL") ?: "cbr");
+        if (g_ascii_strcasecmp(gdpy->encode_rate_control, "cbr") &&
+            g_ascii_strcasecmp(gdpy->encode_rate_control, "vbr") &&
+            g_ascii_strcasecmp(gdpy->encode_rate_control, "cqp") &&
+            g_ascii_strcasecmp(gdpy->encode_rate_control, "icq") &&
+            g_ascii_strcasecmp(gdpy->encode_rate_control, "qvbr")) {
+            warn_report("gvt-stream: unknown rate-control %s, falling back to cbr",
+                        gdpy->encode_rate_control);
+            g_free(gdpy->encode_rate_control);
+            gdpy->encode_rate_control = g_strdup("cbr");
+        }
+        if (gdpy->encode_idle_bitrate >= gdpy->encode_bitrate) {
+            gdpy->encode_idle_bitrate = 0;
+        }
         gdpy->encode_keyint = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_KEYINT",
                                                     30, 1, 300);
         gdpy->video_codec = g_strdup(g_getenv("GVT_STREAM_VIDEO_CODEC") ?: "h265");
@@ -3060,6 +3169,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      " idle_changed_ppm=%" PRIu64 " idle_pixel_delta=%" PRIu64
                      " capture_max=%" PRIu64
                      " encode_file=%s encode_max=%" PRIu64 " encode_fps=%d codec=%s "
+                     "rate_control=%s bitrate=%d idle_bitrate=%d "
                      "path=%s flip=%d dmabuf_caps=%d rtp=%s:%u kms=%s "
                      "kms_atomic=%d publish=%s source=%s",
                      qemu_console_get_index(con), gdpy->refresh_ms,
@@ -3070,6 +3180,8 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      gdpy->idle_pixel_delta, gdpy->capture_max,
                      gdpy->encode_file ?: "",
                      gdpy->encode_max, gdpy->encode_fps, gdpy->video_codec,
+                     gdpy->encode_rate_control, gdpy->encode_bitrate,
+                     gdpy->encode_idle_bitrate,
                      gdpy->encode_dmabuf ? "dmabuf" : "cpu",
                      gdpy->encode_flip, gdpy->encode_dmabuf_caps_feature,
                      gdpy->rtp_host ?: "", (unsigned)gdpy->rtp_port,

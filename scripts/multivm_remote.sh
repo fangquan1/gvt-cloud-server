@@ -751,7 +751,7 @@ start_one() {
         export GVT_STREAM_INPUT_HOST=0.0.0.0
         export GVT_STREAM_INPUT_PORT="$input_port"
         export GVT_STREAM_CAPTURE_MAX=0
-        export GVT_STREAM_IMPORT_TEST=${GVT_STREAM_IMPORT_TEST:-1}
+        export GVT_STREAM_IMPORT_TEST=${GVT_STREAM_IMPORT_TEST:-0}
         export GVT_STREAM_ENCODE_PATH=${GVT_STREAM_ENCODE_PATH:-dmabuf}
         export GVT_STREAM_DMABUF_CAPS_FEATURE=${GVT_STREAM_DMABUF_CAPS_FEATURE:-0}
         export GVT_STREAM_ENCODE_MAX=0
@@ -777,7 +777,13 @@ start_one() {
                 export GVT_STREAM_IDLE_AFTER_MS=1500
                 export GVT_STREAM_IDLE_PROBE_MS=500
                 ;;
-        physical)
+            adaptive)
+                export GVT_STREAM_CAPTURE_MS=16
+                export GVT_STREAM_IDLE_CAPTURE_MS=66
+                export GVT_STREAM_IDLE_AFTER_MS=1000
+                export GVT_STREAM_IDLE_PROBE_MS=250
+                ;;
+            physical)
                 export GVT_STREAM_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_AFTER_MS=0
@@ -804,6 +810,13 @@ start_one() {
             export GVT_STREAM_RTP_FEC_IMPORTANT=0
             export GVT_STREAM_ENCODE_FPS=60
             export GVT_STREAM_ENCODE_BITRATE=12000
+            if [ "$vm_mode" = "adaptive" ]; then
+                export GVT_STREAM_ENCODE_RATE_CONTROL=${GVT_STREAM_ENCODE_RATE_CONTROL:-vbr}
+                export GVT_STREAM_ENCODE_IDLE_BITRATE=${GVT_STREAM_ENCODE_IDLE_BITRATE:-2500}
+            else
+                export GVT_STREAM_ENCODE_RATE_CONTROL=${GVT_STREAM_ENCODE_RATE_CONTROL:-cbr}
+                export GVT_STREAM_ENCODE_IDLE_BITRATE=${GVT_STREAM_ENCODE_IDLE_BITRATE:-0}
+            fi
             export GVT_STREAM_ENCODE_KEYINT=60
             export GVT_STREAM_VIDEO_CODEC=${GVT_STREAM_VIDEO_CODEC:-h265}
         else
@@ -876,9 +889,9 @@ set_vm_mode() {
         exit 2
     fi
     case "$mode" in
-        realtime|realtime30|power_save|physical) ;;
+        realtime|realtime30|power_save|adaptive|physical) ;;
         *)
-            echo "set-mode requires realtime, realtime30, power_save or physical" >&2
+            echo "set-mode requires realtime, realtime30, power_save, adaptive or physical" >&2
             exit 2
             ;;
     esac
