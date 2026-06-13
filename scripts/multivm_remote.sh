@@ -803,7 +803,7 @@ start_one() {
             export GVT_STREAM_RTP_FEC=0
             export GVT_STREAM_RTP_FEC_IMPORTANT=0
             export GVT_STREAM_ENCODE_FPS=60
-            export GVT_STREAM_ENCODE_BITRATE=18000
+            export GVT_STREAM_ENCODE_BITRATE=12000
             export GVT_STREAM_ENCODE_KEYINT=60
         else
             unset GVT_STREAM_RTP_HOST GVT_STREAM_RTP_PORT

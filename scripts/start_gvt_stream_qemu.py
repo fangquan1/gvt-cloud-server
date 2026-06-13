@@ -180,7 +180,7 @@ def main() -> None:
     p.add_argument("--client-host")
     p.add_argument("--port", type=int, default=5004)
     p.add_argument("--fps", type=int, default=60)
-    p.add_argument("--bitrate", type=int, default=18000)
+    p.add_argument("--bitrate", type=int, default=12000)
     p.add_argument("--keyint", type=int)
     p.add_argument("--path", choices=["dmabuf", "cpu"], default="dmabuf")
     p.add_argument("--flip", action="store_true")
