@@ -783,7 +783,7 @@ start_one() {
             adaptive)
                 export GVT_STREAM_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_CAPTURE_MS=66
-                export GVT_STREAM_IDLE_STILL_CAPTURE_MS=30000
+                export GVT_STREAM_IDLE_STILL_CAPTURE_MS=1000
                 export GVT_STREAM_IDLE_AFTER_MS=1000
                 export GVT_STREAM_IDLE_PROBE_MS=500
                 ;;
@@ -817,7 +817,7 @@ start_one() {
             export GVT_STREAM_ENCODE_BITRATE=12000
             if [ "$vm_mode" = "adaptive" ]; then
                 export GVT_STREAM_ENCODE_RATE_CONTROL=${GVT_STREAM_ENCODE_RATE_CONTROL:-vbr}
-                export GVT_STREAM_ENCODE_IDLE_BITRATE=${GVT_STREAM_ENCODE_IDLE_BITRATE:-2500}
+                export GVT_STREAM_ENCODE_IDLE_BITRATE=${GVT_STREAM_ENCODE_IDLE_BITRATE:-3500}
             else
                 export GVT_STREAM_ENCODE_RATE_CONTROL=${GVT_STREAM_ENCODE_RATE_CONTROL:-cbr}
                 export GVT_STREAM_ENCODE_IDLE_BITRATE=${GVT_STREAM_ENCODE_IDLE_BITRATE:-0}
