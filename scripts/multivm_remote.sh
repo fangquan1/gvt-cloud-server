@@ -762,30 +762,35 @@ start_one() {
             realtime)
                 export GVT_STREAM_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_CAPTURE_MS=16
+                export GVT_STREAM_IDLE_STILL_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_AFTER_MS=0
                 export GVT_STREAM_IDLE_PROBE_MS=0
                 ;;
             realtime30)
                 export GVT_STREAM_CAPTURE_MS=33
                 export GVT_STREAM_IDLE_CAPTURE_MS=33
+                export GVT_STREAM_IDLE_STILL_CAPTURE_MS=33
                 export GVT_STREAM_IDLE_AFTER_MS=0
                 export GVT_STREAM_IDLE_PROBE_MS=0
                 ;;
             power_save)
                 export GVT_STREAM_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_CAPTURE_MS=66
+                export GVT_STREAM_IDLE_STILL_CAPTURE_MS=66
                 export GVT_STREAM_IDLE_AFTER_MS=1500
                 export GVT_STREAM_IDLE_PROBE_MS=500
                 ;;
             adaptive)
                 export GVT_STREAM_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_CAPTURE_MS=66
+                export GVT_STREAM_IDLE_STILL_CAPTURE_MS=30000
                 export GVT_STREAM_IDLE_AFTER_MS=1000
-                export GVT_STREAM_IDLE_PROBE_MS=250
+                export GVT_STREAM_IDLE_PROBE_MS=500
                 ;;
             physical)
                 export GVT_STREAM_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_CAPTURE_MS=16
+                export GVT_STREAM_IDLE_STILL_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_AFTER_MS=0
                 export GVT_STREAM_IDLE_PROBE_MS=0
                 ;;

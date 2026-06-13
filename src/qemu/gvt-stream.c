@@ -77,6 +77,7 @@ typedef struct GVTStreamDisplay {
     uint64_t capture_fail_count;
     uint64_t capture_ms;
     uint64_t idle_capture_ms;
+    uint64_t idle_still_capture_ms;
     uint64_t idle_after_ms;
     uint64_t idle_probe_ms;
     uint64_t idle_changed_ppm;
@@ -257,17 +258,12 @@ static bool gvt_stream_getenv_bool(const char *name, bool defval)
     return defval;
 }
 
+static int64_t gvt_stream_last_activity_ms(GVTStreamDisplay *gdpy);
+
 static uint64_t gvt_stream_effective_capture_ms(GVTStreamDisplay *gdpy,
                                                 int64_t now_ms)
 {
-    int64_t last_activity_ms = gdpy->last_activity_ms;
-
-    if (gdpy->last_content_change_ms > last_activity_ms) {
-        last_activity_ms = gdpy->last_content_change_ms;
-    }
-    if (gvt_stream_last_input_ms > last_activity_ms) {
-        last_activity_ms = gvt_stream_last_input_ms;
-    }
+    int64_t last_activity_ms = gvt_stream_last_activity_ms(gdpy);
 
     if (gdpy->idle_capture_ms <= gdpy->capture_ms ||
         !gdpy->idle_after_ms || !last_activity_ms) {
@@ -275,6 +271,11 @@ static uint64_t gvt_stream_effective_capture_ms(GVTStreamDisplay *gdpy,
     }
     if (now_ms - last_activity_ms <= gdpy->idle_after_ms) {
         return gdpy->capture_ms;
+    }
+    if (gdpy->idle_still_capture_ms > gdpy->idle_capture_ms &&
+        gdpy->idle_sample_valid &&
+        gdpy->last_probe_diff_ppm <= gdpy->idle_changed_ppm) {
+        return gdpy->idle_still_capture_ms;
     }
     return gdpy->idle_capture_ms;
 }
@@ -3039,6 +3040,9 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->idle_capture_ms =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_CAPTURE_MS",
                                   gdpy->capture_ms, 16, 60000);
+        gdpy->idle_still_capture_ms =
+            gvt_stream_getenv_u64("GVT_STREAM_IDLE_STILL_CAPTURE_MS",
+                                  gdpy->idle_capture_ms, 0, 60000);
         gdpy->idle_after_ms =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_AFTER_MS",
                                   1000, 0, 60000);
@@ -3165,6 +3169,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         error_report("gvt-stream: listener console=%d refresh_ms=%" PRIu64
                      " report_ms=%" PRIu64 " verbose=%d import_test=%d "
                      "capture_dir=%s capture_ms=%" PRIu64 " idle_capture_ms=%" PRIu64
+                     " idle_still_capture_ms=%" PRIu64
                      " idle_after_ms=%" PRIu64 " idle_probe_ms=%" PRIu64
                      " idle_changed_ppm=%" PRIu64 " idle_pixel_delta=%" PRIu64
                      " capture_max=%" PRIu64
@@ -3175,7 +3180,8 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      qemu_console_get_index(con), gdpy->refresh_ms,
                      gdpy->report_ms, gdpy->verbose, gdpy->import_test,
                      gdpy->capture_dir ?: "", gdpy->capture_ms,
-                     gdpy->idle_capture_ms, gdpy->idle_after_ms,
+                     gdpy->idle_capture_ms, gdpy->idle_still_capture_ms,
+                     gdpy->idle_after_ms,
                      gdpy->idle_probe_ms, gdpy->idle_changed_ppm,
                      gdpy->idle_pixel_delta, gdpy->capture_max,
                      gdpy->encode_file ?: "",
