@@ -743,7 +743,7 @@ start_one() {
         export LIBVA_DRIVERS_PATH=/usr/lib64/dri:/usr/local/lib64/dri
         export GST_VAAPI_ALL_DRIVERS=1
         export GVT_STREAM_REFRESH_MS=16
-        export GVT_STREAM_REPORT_MS=1000
+        export GVT_STREAM_REPORT_MS=5000
         export GVT_STREAM_VERBOSE=0
         export GVT_STREAM_KMS_DEVICE=/dev/dri/card0
         export GVT_STREAM_KMS_ATOMIC=1
@@ -784,8 +784,8 @@ start_one() {
                 export GVT_STREAM_CAPTURE_MS=16
                 export GVT_STREAM_IDLE_CAPTURE_MS=66
                 export GVT_STREAM_IDLE_STILL_CAPTURE_MS=1000
-                export GVT_STREAM_IDLE_AFTER_MS=1000
-                export GVT_STREAM_IDLE_PROBE_MS=500
+                export GVT_STREAM_IDLE_AFTER_MS=2000
+                export GVT_STREAM_IDLE_PROBE_MS=1000
                 ;;
             physical)
                 export GVT_STREAM_CAPTURE_MS=16
