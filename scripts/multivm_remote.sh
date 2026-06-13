@@ -818,9 +818,11 @@ start_one() {
             if [ "$vm_mode" = "adaptive" ]; then
                 export GVT_STREAM_ENCODE_RATE_CONTROL=${GVT_STREAM_ENCODE_RATE_CONTROL:-vbr}
                 export GVT_STREAM_ENCODE_IDLE_BITRATE=${GVT_STREAM_ENCODE_IDLE_BITRATE:-3500}
+                export GVT_STREAM_ENCODE_STILL_BITRATE=${GVT_STREAM_ENCODE_STILL_BITRATE:-12000}
             else
                 export GVT_STREAM_ENCODE_RATE_CONTROL=${GVT_STREAM_ENCODE_RATE_CONTROL:-cbr}
                 export GVT_STREAM_ENCODE_IDLE_BITRATE=${GVT_STREAM_ENCODE_IDLE_BITRATE:-0}
+                export GVT_STREAM_ENCODE_STILL_BITRATE=${GVT_STREAM_ENCODE_STILL_BITRATE:-0}
             fi
             export GVT_STREAM_ENCODE_KEYINT=60
             export GVT_STREAM_VIDEO_CODEC=${GVT_STREAM_VIDEO_CODEC:-h265}

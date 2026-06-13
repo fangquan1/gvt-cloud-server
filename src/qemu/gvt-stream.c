@@ -102,6 +102,7 @@ typedef struct GVTStreamDisplay {
     int encode_fps;
     int encode_bitrate;
     int encode_idle_bitrate;
+    int encode_still_bitrate;
     int encode_current_bitrate;
     int encode_keyint;
     uint64_t rtp_port;
@@ -305,6 +306,15 @@ static bool gvt_stream_activity_is_idle(GVTStreamDisplay *gdpy,
 static int gvt_stream_effective_bitrate(GVTStreamDisplay *gdpy,
                                         int64_t now_ms)
 {
+    uint64_t capture_ms;
+
+    if (gvt_stream_activity_is_idle(gdpy, now_ms)) {
+        capture_ms = gvt_stream_effective_capture_ms(gdpy, now_ms);
+        if (gdpy->encode_still_bitrate > 0 &&
+            capture_ms > gdpy->idle_capture_ms) {
+            return gdpy->encode_still_bitrate;
+        }
+    }
     if (gdpy->encode_idle_bitrate > 0 &&
         gdpy->encode_idle_bitrate < gdpy->encode_bitrate &&
         gvt_stream_activity_is_idle(gdpy, now_ms)) {
@@ -2259,24 +2269,27 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
 
     if (gdpy->rtp_host && gdpy->rtp_port) {
         error_report("gvt-stream: encode-start codec=%s rtp=%s:%u size=%dx%d fps=%d "
-                     "rate_control=%s bitrate=%d idle_bitrate=%d keyint=%d "
+                     "rate_control=%s bitrate=%d idle_bitrate=%d still_bitrate=%d "
+                     "keyint=%d "
                      "fec=%u/%u path=%s dmabuf_caps=%d flip=%d",
                      gdpy->video_codec,
                      gdpy->rtp_host, (unsigned)gdpy->rtp_port, width, height,
                      gdpy->encode_fps, gdpy->encode_rate_control,
                      gdpy->encode_bitrate, gdpy->encode_idle_bitrate,
-                     gdpy->encode_keyint,
+                     gdpy->encode_still_bitrate, gdpy->encode_keyint,
                      (unsigned)gdpy->rtp_fec, (unsigned)gdpy->rtp_fec_important,
                      gdpy->encode_dmabuf ? "dmabuf" : "cpu",
                      gdpy->encode_dmabuf_caps_feature, gdpy->encode_flip);
     } else {
         error_report("gvt-stream: encode-start codec=%s file=%s size=%dx%d fps=%d "
-                     "rate_control=%s bitrate=%d idle_bitrate=%d keyint=%d "
+                     "rate_control=%s bitrate=%d idle_bitrate=%d still_bitrate=%d "
+                     "keyint=%d "
                      "path=%s dmabuf_caps=%d flip=%d",
                      gdpy->video_codec,
                      gdpy->encode_file, width, height, gdpy->encode_fps,
                      gdpy->encode_rate_control, gdpy->encode_bitrate,
-                     gdpy->encode_idle_bitrate, gdpy->encode_keyint,
+                     gdpy->encode_idle_bitrate, gdpy->encode_still_bitrate,
+                     gdpy->encode_keyint,
                      gdpy->encode_dmabuf ? "dmabuf" : "cpu",
                      gdpy->encode_dmabuf_caps_feature, gdpy->encode_flip);
     }
@@ -2394,9 +2407,9 @@ static void gvt_stream_encoder_update_bitrate(GVTStreamDisplay *gdpy,
     g_object_set(gdpy->encode_encoder, "bitrate", target_bitrate, NULL);
     gdpy->encode_current_bitrate = target_bitrate;
     error_report("gvt-stream: encoder-bitrate-change bitrate=%d active=%d "
-                 "idle=%d capture_ms=%" PRIu64 " idle=%d",
+                 "idle=%d still=%d capture_ms=%" PRIu64 " idle=%d",
                  target_bitrate, gdpy->encode_bitrate,
-                 gdpy->encode_idle_bitrate,
+                 gdpy->encode_idle_bitrate, gdpy->encode_still_bitrate,
                  gvt_stream_effective_capture_ms(gdpy, now_ms),
                  gvt_stream_activity_is_idle(gdpy, now_ms));
 }
@@ -3070,6 +3083,9 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->encode_idle_bitrate =
             gvt_stream_getenv_u64("GVT_STREAM_ENCODE_IDLE_BITRATE",
                                   0, 0, 100000);
+        gdpy->encode_still_bitrate =
+            gvt_stream_getenv_u64("GVT_STREAM_ENCODE_STILL_BITRATE",
+                                  gdpy->encode_bitrate, 0, 100000);
         gdpy->encode_rate_control =
             g_strdup(g_getenv("GVT_STREAM_ENCODE_RATE_CONTROL") ?: "cbr");
         if (g_ascii_strcasecmp(gdpy->encode_rate_control, "cbr") &&
@@ -3084,6 +3100,9 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         }
         if (gdpy->encode_idle_bitrate >= gdpy->encode_bitrate) {
             gdpy->encode_idle_bitrate = 0;
+        }
+        if (gdpy->encode_still_bitrate <= 0) {
+            gdpy->encode_still_bitrate = gdpy->encode_bitrate;
         }
         gdpy->encode_keyint = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_KEYINT",
                                                     30, 1, 300);
@@ -3174,7 +3193,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      " idle_changed_ppm=%" PRIu64 " idle_pixel_delta=%" PRIu64
                      " capture_max=%" PRIu64
                      " encode_file=%s encode_max=%" PRIu64 " encode_fps=%d codec=%s "
-                     "rate_control=%s bitrate=%d idle_bitrate=%d "
+                     "rate_control=%s bitrate=%d idle_bitrate=%d still_bitrate=%d "
                      "path=%s flip=%d dmabuf_caps=%d rtp=%s:%u kms=%s "
                      "kms_atomic=%d publish=%s source=%s",
                      qemu_console_get_index(con), gdpy->refresh_ms,
@@ -3187,7 +3206,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      gdpy->encode_file ?: "",
                      gdpy->encode_max, gdpy->encode_fps, gdpy->video_codec,
                      gdpy->encode_rate_control, gdpy->encode_bitrate,
-                     gdpy->encode_idle_bitrate,
+                     gdpy->encode_idle_bitrate, gdpy->encode_still_bitrate,
                      gdpy->encode_dmabuf ? "dmabuf" : "cpu",
                      gdpy->encode_flip, gdpy->encode_dmabuf_caps_feature,
                      gdpy->rtp_host ?: "", (unsigned)gdpy->rtp_port,
