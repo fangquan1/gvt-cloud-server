@@ -208,6 +208,8 @@ struct GVTStreamControlClient {
     int fd;
     char host[INET_ADDRSTRLEN];
     GString *buffer;
+    int64_t accepted_ms;
+    uint64_t messages;
 };
 
 struct GVTStreamControlServer {
@@ -1055,6 +1057,7 @@ static void gvt_stream_control_send_status(GVTStreamControlClient *client,
 {
     GVTStreamDisplay *gdpy = gvt_stream_control_display;
     char message[512];
+    int64_t start_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     ssize_t ret;
 
     if (!client) {
@@ -1078,6 +1081,11 @@ static void gvt_stream_control_send_status(GVTStreamControlClient *client,
     }
 
     ret = send(client->fd, message, strlen(message), MSG_NOSIGNAL);
+    error_report("gvt-stream-control: status-send ok=%d bytes=%zu ret=%zd "
+                 "send_ms=%" PRId64 " since_accept_ms=%" PRId64,
+                 ok, strlen(message), ret,
+                 qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - start_ms,
+                 start_ms - client->accepted_ms);
     if (ret < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
         warn_report("gvt-stream-control: status send failed: %s",
                     strerror(errno));
@@ -1087,6 +1095,10 @@ static void gvt_stream_control_send_status(GVTStreamControlClient *client,
 static void gvt_stream_control_process_line(GVTStreamControlClient *client,
                                             const char *line)
 {
+    int64_t start_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    int64_t parse_done_ms;
+    int64_t apply_start_ms;
+    int64_t apply_done_ms;
     Error *err = NULL;
     QObject *obj;
     QDict *dict;
@@ -1095,6 +1107,10 @@ static void gvt_stream_control_process_line(GVTStreamControlClient *client,
     if (!line || !*line) {
         return;
     }
+    client->messages++;
+    error_report("gvt-stream-control: message #%" PRIu64
+                 " bytes=%zu since_accept_ms=%" PRId64,
+                 client->messages, strlen(line), start_ms - client->accepted_ms);
 
     obj = qobject_from_json(line, &err);
     if (err) {
@@ -1111,6 +1127,7 @@ static void gvt_stream_control_process_line(GVTStreamControlClient *client,
         qobject_unref(obj);
         return;
     }
+    parse_done_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     type = qdict_get_try_str(dict, "type");
     if (!g_strcmp0(type, "start")) {
@@ -1125,10 +1142,17 @@ static void gvt_stream_control_process_line(GVTStreamControlClient *client,
         if (!port && gvt_stream_control_server) {
             port = gvt_stream_control_server->listen_port;
         }
+        apply_start_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         started = gvt_stream_control_apply_start(gvt_stream_control_display,
                                                  host, port, codec);
+        apply_done_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         gvt_stream_control_send_status(client, started,
                                        "invalid start request");
+        error_report("gvt-stream-control: start timing parse_ms=%" PRId64
+                     " apply_ms=%" PRId64 " total_ms=%" PRId64,
+                     parse_done_ms - start_ms,
+                     apply_done_ms - apply_start_ms,
+                     qemu_clock_get_ms(QEMU_CLOCK_REALTIME) - start_ms);
         if (started) {
             gvt_stream_control_active_client = client;
             gvt_stream_control_server->messages++;
@@ -1219,6 +1243,7 @@ static void gvt_stream_control_accept(void *opaque)
         int fd = accept(server->listen_fd, (struct sockaddr *)&addr, &addrlen);
         GVTStreamControlClient *client;
         int one = 1;
+        int64_t accept_ms;
 
         if (fd < 0) {
             if (errno == EINTR) {
@@ -1231,6 +1256,7 @@ static void gvt_stream_control_accept(void *opaque)
             return;
         }
 
+        accept_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         qemu_set_cloexec(fd);
         gvt_stream_set_nonblock(fd);
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
@@ -1241,6 +1267,7 @@ static void gvt_stream_control_accept(void *opaque)
                        sizeof(client->host))) {
             snprintf(client->host, sizeof(client->host), "%s", "0.0.0.0");
         }
+        client->accepted_ms = accept_ms;
         client->buffer = g_string_new(NULL);
         server->clients = g_list_prepend(server->clients, client);
         server->connected++;
@@ -1256,8 +1283,15 @@ static void gvt_stream_control_accept(void *opaque)
          * line here as well as via the fd handler so the protocol does not
          * depend on a second readability wakeup after accept.
          */
+        int64_t poll_start_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
-        if (poll(&pfd, 1, 1000) > 0 && (pfd.revents & POLLIN)) {
+        int poll_ret = poll(&pfd, 1, 1000);
+        int64_t poll_done_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+        error_report("gvt-stream-control: first-message-poll ret=%d revents=0x%x "
+                     "poll_wait_ms=%" PRId64 " since_accept_ms=%" PRId64,
+                     poll_ret, pfd.revents, poll_done_ms - poll_start_ms,
+                     poll_done_ms - accept_ms);
+        if (poll_ret > 0 && (pfd.revents & POLLIN)) {
             gvt_stream_control_client_read(client);
         }
     }
