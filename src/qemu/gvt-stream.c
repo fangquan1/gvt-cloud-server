@@ -202,6 +202,7 @@ struct GVTStreamInputServer {
     uint64_t messages;
     uint64_t events;
     uint64_t parse_errors;
+    uint64_t debug_logs;
 };
 
 struct GVTStreamControlClient {
@@ -229,6 +230,8 @@ static GVTStreamControlServer *gvt_stream_control_server;
 static GVTStreamDisplay *gvt_stream_control_display;
 static GVTStreamControlClient *gvt_stream_control_active_client;
 static int64_t gvt_stream_last_input_ms;
+static int64_t gvt_stream_last_input_seq;
+static int64_t gvt_stream_last_input_capture_seq;
 static uint64_t gvt_stream_spice_port;
 static uint64_t gvt_stream_input_port;
 
@@ -813,10 +816,19 @@ static void gvt_stream_input_process_line(GVTStreamInputClient *client,
     Error *err = NULL;
     QObject *obj;
     QDict *dict;
+    const char *type;
+    int64_t seq;
+    int64_t client_wall_ms;
+    int64_t client_queue_ms;
+    int64_t recv_ms;
+    int64_t recv_wall_ms;
+    int64_t done_ms;
 
     if (!line || !*line) {
         return;
     }
+    recv_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    recv_wall_ms = g_get_real_time() / 1000;
 
     obj = qobject_from_json(line, &err);
     if (err) {
@@ -833,10 +845,30 @@ static void gvt_stream_input_process_line(GVTStreamInputClient *client,
         return;
     }
 
-    gvt_stream_last_input_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    type = qdict_get_try_str(dict, "type") ?: "?";
+    seq = qdict_get_try_int(dict, "_seq", 0);
+    client_wall_ms = qdict_get_try_int(dict, "_client_wall_ms", 0);
+    client_queue_ms = qdict_get_try_int(dict, "_client_queue_ms", -1);
+
+    gvt_stream_last_input_ms = recv_ms;
+    if (seq > 0) {
+        gvt_stream_last_input_seq = seq;
+    }
     gvt_stream_input_process_dict(server, dict);
     qemu_input_event_sync();
+    done_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     server->messages++;
+    if (seq > 0 && (seq <= 80 || (seq % 120) == 0 ||
+                    g_strcmp0(type, "move"))) {
+        server->debug_logs++;
+        error_report("latency-input-recv seq=%" PRId64 " type=%s client_queue_ms=%" PRId64
+                     " server_process_ms=%" PRId64 " clock_delta_ms=%" PRId64
+                     " messages=%" PRIu64 " events=%" PRIu64
+                     " parse_errors=%" PRIu64,
+                     seq, type, client_queue_ms, done_ms - recv_ms,
+                     client_wall_ms ? recv_wall_ms - client_wall_ms : 0,
+                     server->messages, server->events, server->parse_errors);
+    }
     qobject_unref(obj);
 }
 
@@ -3062,6 +3094,20 @@ static void gvt_stream_capture_frame(GVTStreamDisplay *gdpy, int64_t now_ms)
     }
 
     if (gdpy->encode_dmabuf && !gdpy->capture_dir) {
+        if (gvt_stream_last_input_seq > 0 &&
+            gvt_stream_last_input_capture_seq != gvt_stream_last_input_seq &&
+            gvt_stream_last_input_ms > 0 &&
+            now_ms - gvt_stream_last_input_ms < 1000) {
+            gvt_stream_last_input_capture_seq = gvt_stream_last_input_seq;
+            error_report("latency-video-after-input seq=%" PRId64
+                         " input_to_capture_ms=%" PRId64
+                         " next_capture=%" PRIu64
+                         " encoded=%" PRIu64,
+                         gvt_stream_last_input_seq,
+                         now_ms - gvt_stream_last_input_ms,
+                         gdpy->capture_count + 1,
+                         gdpy->encode_count);
+        }
         gdpy->capture_count++;
         gdpy->last_capture_ms = now_ms;
         gvt_stream_encoder_push_dmabuf(gdpy, dmabuf, now_ms);
@@ -3358,6 +3404,8 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      " bitrate=%d target_bitrate=%d capture_ms=%" PRIu64
                      " probe_diff_ppm=%" PRIu64 " probes=%" PRIu64
                      " idle_wakes=%" PRIu64
+                     " input_msgs=%" PRIu64 " input_events=%" PRIu64
+                     " input_parse_errors=%" PRIu64 " last_input_age_ms=%" PRId64
                      " kms=%" PRIu64 "/%" PRIu64
                      " atomic=%" PRIu64 " atomic_fallback=%" PRIu64
                      " pf=%" PRIu64 " ms=%" PRIu64
@@ -3376,6 +3424,14 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      gvt_stream_effective_capture_ms(gdpy, now_ms),
                       gdpy->last_probe_diff_ppm, gdpy->idle_probe_count,
                       gdpy->idle_wake_count,
+                      gvt_stream_input_server ?
+                      gvt_stream_input_server->messages : 0,
+                      gvt_stream_input_server ?
+                      gvt_stream_input_server->events : 0,
+                      gvt_stream_input_server ?
+                      gvt_stream_input_server->parse_errors : 0,
+                      gvt_stream_last_input_ms ?
+                      now_ms - gvt_stream_last_input_ms : -1,
                       gdpy->kms_commit_count, gdpy->kms_fail_count,
                       gdpy->kms_atomic_count, gdpy->kms_atomic_fallback_count,
                       gdpy->kms_page_flip_count, gdpy->kms_modeset_count,
