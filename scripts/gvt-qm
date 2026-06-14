@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_DIR=${GVT_QM_CONFIG_DIR:-/etc/gvt-qm}
+UNIT_PREFIX=${GVT_QM_UNIT_PREFIX:-gvt-qemu}
+
+usage() {
+  cat <<EOF
+Usage:
+  gvt-qm list
+  gvt-qm start <vm>
+  gvt-qm stop <vm>
+  gvt-qm restart <vm>
+  gvt-qm status <vm>
+  gvt-qm logs <vm>
+
+VM configs live in:
+  $CONFIG_DIR/<vm>.conf
+EOF
+}
+
+require_vm() {
+  local vm=${1:-}
+  if [[ ! "$vm" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+    echo "invalid or missing VM id" >&2
+    usage >&2
+    exit 2
+  fi
+  if [ ! -r "$CONFIG_DIR/$vm.conf" ]; then
+    echo "missing VM config: $CONFIG_DIR/$vm.conf" >&2
+    exit 1
+  fi
+  printf '%s\n' "$vm"
+}
+
+unit_name() {
+  systemd-escape --template="$UNIT_PREFIX@.service" "$1"
+}
+
+print_vm_summary() {
+  local vm=$1
+  # shellcheck source=/dev/null
+  . "$CONFIG_DIR/$vm.conf"
+  printf 'VM: %s\n' "$vm"
+  printf '  video/control: %s\n' "${VIDEO_PORT:-5004}"
+  printf '  spice:         %s\n' "${SPICE_PORT:-5900}"
+  printf '  input:         %s\n' "${INPUT_PORT:-5905}"
+  printf '  disk:          %s\n' "${VM_DISK:-}"
+  printf '  tap:           %s\n' "${TAP_IF:-tap-$vm}"
+  printf '  log:           %s\n' "${QEMU_LOG:-${QEMU_DIR:-/root/qemu_cmd}/$vm.log}"
+}
+
+cmd=${1:-}
+case "$cmd" in
+  list)
+    shopt -s nullglob
+    for conf in "$CONFIG_DIR"/*.conf; do
+      vm=$(basename "$conf" .conf)
+      unit=$(unit_name "$vm")
+      state=$(systemctl is-active "$unit" 2>/dev/null || true)
+      printf '%-16s %s\n' "$vm" "${state:-unknown}"
+    done
+    ;;
+  start)
+    vm=$(require_vm "${2:-}")
+    systemctl start "$(unit_name "$vm")"
+    print_vm_summary "$vm"
+    systemctl --no-pager --lines=20 status "$(unit_name "$vm")" || true
+    ;;
+  stop)
+    vm=$(require_vm "${2:-}")
+    systemctl stop "$(unit_name "$vm")"
+    systemctl --no-pager --lines=20 status "$(unit_name "$vm")" || true
+    ;;
+  restart)
+    vm=$(require_vm "${2:-}")
+    systemctl restart "$(unit_name "$vm")"
+    print_vm_summary "$vm"
+    systemctl --no-pager --lines=20 status "$(unit_name "$vm")" || true
+    ;;
+  status)
+    vm=$(require_vm "${2:-}")
+    print_vm_summary "$vm"
+    systemctl --no-pager --lines=30 status "$(unit_name "$vm")" || true
+    ;;
+  logs)
+    vm=$(require_vm "${2:-}")
+    # shellcheck source=/dev/null
+    . "$CONFIG_DIR/$vm.conf"
+    log=${QEMU_LOG:-${QEMU_DIR:-/root/qemu_cmd}/$vm.log}
+    echo "== journal =="
+    journalctl -u "$(unit_name "$vm")" -n 80 --no-pager || true
+    echo "== qemu log: $log =="
+    tail -120 "$log" 2>/dev/null || true
+    ;;
+  -h|--help|help|"")
+    usage
+    ;;
+  *)
+    echo "unknown command: $cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

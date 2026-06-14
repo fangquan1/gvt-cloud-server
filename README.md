@@ -12,7 +12,8 @@ Start with:
 - `src/qemu/gvt-stream.c`
 - `src/outputd/gvt-outputd.c`
 - `src/outputd/gvt-output-web.py`
-- `scripts/start_gvt_stream_qemu.py`
+- `scripts/gvt-qm`
+- `deploy/systemd/gvt-qemu@.service`
 
 Current baseline:
 
@@ -22,23 +23,26 @@ Current baseline:
 - Optional power-saving mode.
 - Multi-VM physical DP/HDMI switching through `gvt-outputd`.
 
-Single-command VM start for the current Windows 10 baseline:
+PVE-style VM lifecycle:
 
 ```bash
-./scripts/gvt-qemu-win10.sh --client 192.168.0.110 --port 5004
+./deploy/install-gvt-qm.sh
+gvt-qm start win10
+gvt-qm status win10
+gvt-qm logs win10
+gvt-qm stop win10
 ```
 
-This wrapper expands to the existing QEMU gvt-stream command, disables FEC,
-uses H.265 by default, and publishes:
+The VM config lives in `/etc/gvt-qm/win10.conf`, and the QEMU process is owned
+by `gvt-qemu@win10.service`, so closing the SSH terminal does not kill the VM.
+The default Windows 10 baseline publishes:
 
-- gvt-stream video RTP on the selected `--port`
-- SPICE audio/session on `--spice-port` (default `5900`)
-- native input on `--input-port` (default `5905`)
+- gvt-stream control/video port `5004`
+- SPICE audio/session port `5900`
+- native input port `5905`
 
-The underlying QEMU display option is now explicit as
-`-display gvt-stream,host=<client>,port=<port>,codec=<codec>,...`. The current
-RTP transport is still server-push, so `--client` is required until the display
-backend grows a true viewer-style session handshake.
+The underlying QEMU display option is still explicit in the generated command:
+`-display gvt-stream,rendernode=/dev/dri/renderD128,codec=h265,port=5004`.
 
 Control plane MVP:
 
