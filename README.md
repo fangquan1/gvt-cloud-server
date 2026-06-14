@@ -22,6 +22,24 @@ Current baseline:
 - Optional power-saving mode.
 - Multi-VM physical DP/HDMI switching through `gvt-outputd`.
 
+Single-command VM start for the current Windows 10 baseline:
+
+```bash
+./scripts/gvt-qemu-win10.sh --client 192.168.0.110 --port 5004
+```
+
+This wrapper expands to the existing QEMU gvt-stream command, disables FEC,
+uses H.265 by default, and publishes:
+
+- gvt-stream video RTP on the selected `--port`
+- SPICE audio/session on `--spice-port` (default `5900`)
+- native input on `--input-port` (default `5905`)
+
+The underlying QEMU display option is now explicit as
+`-display gvt-stream,host=<client>,port=<port>,codec=<codec>,...`. The current
+RTP transport is still server-push, so `--client` is required until the display
+backend grows a true viewer-style session handshake.
+
 Control plane MVP:
 
 ```bash

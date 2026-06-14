@@ -5,6 +5,9 @@ QEMU_LOG=/root/qemu_cmd/win10-gvt-stream-diag.log
 MONITOR_SOCK=/root/qemu_cmd/win10-gvt-stream-monitor.sock
 QMP_SOCK=/root/qemu_cmd/win10-gvt-stream-qmp.sock
 SPICE_AUDIO_PORT=${GVT_STREAM_SPICE_AUDIO_PORT:-5900}
+VIDEO_CODEC=${GVT_STREAM_VIDEO_CODEC:-h265}
+RTP_HOST=${GVT_STREAM_RTP_HOST:-}
+RTP_PORT=${GVT_STREAM_RTP_PORT:-}
 TAP_IF=tap-win10
 BR_IF=br0
 VM_DISK=/root/qemu_cmd/archive/gvtg-spice-net-audio-20260530-1209/win10-gvtg-spice-net-audio.qcow2
@@ -43,9 +46,14 @@ for evdev in ${GVT_STREAM_EVDEV_INPUTS:-}; do
   input_idx=$((input_idx + 1))
 done
 
+DISPLAY_OPTS="gvt-stream,rendernode=/dev/dri/renderD128,codec=${VIDEO_CODEC}"
+if [ -n "$RTP_HOST" ] && [ -n "$RTP_PORT" ]; then
+  DISPLAY_OPTS="${DISPLAY_OPTS},host=${RTP_HOST},port=${RTP_PORT}"
+fi
+
 nohup "$QEMU_BIN" \
   --nodefaults -enable-kvm -cpu host -m 4096 -smp 4 -boot order=c \
-  -display gvt-stream,rendernode=/dev/dri/renderD128,codec=h264 \
+  -display "$DISPLAY_OPTS" \
   -spice port="$SPICE_AUDIO_PORT",addr=0.0.0.0,disable-ticketing=on,agent-mouse=off,playback-compression=off,streaming-video=off,image-compression=off,disable-copy-paste=on,disable-agent-file-xfer=on,display=none \
   -device vfio-pci-nohotplug,sysfsdev=/sys/bus/pci/devices/0000:00:02.0/f8cd7bd7-eabf-4d0b-ab00-d899e4107ae7,display=on,x-igd-opregion=on,ramfb=on \
   -hda "$VM_DISK" \
