@@ -206,12 +206,14 @@ struct GVTStreamInputServer {
 
 struct GVTStreamControlClient {
     int fd;
+    char host[INET_ADDRSTRLEN];
     GString *buffer;
 };
 
 struct GVTStreamControlServer {
     int listen_fd;
-    char *socket_path;
+    char listen_host[INET_ADDRSTRLEN];
+    uint64_t listen_port;
     GList *clients;
     uint64_t connected;
     uint64_t messages;
@@ -223,9 +225,11 @@ static GVTStreamInputServer *gvt_stream_input_server;
 static GVTStreamDisplay *gvt_stream_input_display;
 static GVTStreamControlServer *gvt_stream_control_server;
 static GVTStreamDisplay *gvt_stream_control_display;
+static GVTStreamControlClient *gvt_stream_control_active_client;
 static int64_t gvt_stream_last_input_ms;
 
 static void gvt_stream_encoder_finish(GVTStreamDisplay *gdpy);
+static void gvt_stream_capture_frame(GVTStreamDisplay *gdpy, int64_t now_ms);
 
 static uint64_t gvt_stream_getenv_u64(const char *name,
                                       uint64_t defval,
@@ -969,7 +973,7 @@ static void gvt_stream_control_apply_stop(GVTStreamDisplay *gdpy)
     error_report("gvt-stream-control: stream stopped");
 }
 
-static void gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
+static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
                                            const char *host,
                                            uint64_t port,
                                            const char *codec)
@@ -978,7 +982,7 @@ static void gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
 
     if (!gdpy || !host || !*host || !port) {
         warn_report("gvt-stream-control: ignoring invalid START target");
-        return;
+        return false;
     }
     if (codec && *codec &&
         g_ascii_strcasecmp(codec, "h264") &&
@@ -1009,6 +1013,10 @@ static void gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
     gvt_stream_last_input_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     error_report("gvt-stream-control: stream target=%s:%u codec=%s",
                  gdpy->rtp_host, (unsigned)gdpy->rtp_port, gdpy->video_codec);
+    if (gdpy->scanout) {
+        gvt_stream_capture_frame(gdpy, gvt_stream_last_input_ms);
+    }
+    return true;
 }
 
 static void gvt_stream_control_process_line(GVTStreamControlClient *client,
@@ -1041,14 +1049,25 @@ static void gvt_stream_control_process_line(GVTStreamControlClient *client,
 
     type = qdict_get_try_str(dict, "type");
     if (!g_strcmp0(type, "start")) {
-        const char *host = qdict_get_try_str(dict, "host");
+        const char *host = qdict_get_try_str(dict, "host") ?: client->host;
         const char *codec = qdict_get_try_str(dict, "codec");
-        uint64_t port = qdict_get_try_int(dict, "port", 0);
+        uint64_t port = qdict_get_try_int(dict, "video_port", 0);
 
-        gvt_stream_control_apply_start(gvt_stream_control_display,
-                                       host, port, codec);
-        gvt_stream_control_server->messages++;
+        if (!port) {
+            port = qdict_get_try_int(dict, "port", 0);
+        }
+        if (!port && gvt_stream_control_server) {
+            port = gvt_stream_control_server->listen_port;
+        }
+        if (gvt_stream_control_apply_start(gvt_stream_control_display,
+                                           host, port, codec)) {
+            gvt_stream_control_active_client = client;
+            gvt_stream_control_server->messages++;
+        }
     } else if (!g_strcmp0(type, "stop")) {
+        if (gvt_stream_control_active_client == client) {
+            gvt_stream_control_active_client = NULL;
+        }
         gvt_stream_control_apply_stop(gvt_stream_control_display);
         gvt_stream_control_server->messages++;
     } else {
@@ -1067,6 +1086,10 @@ static void gvt_stream_control_client_close(GVTStreamControlClient *client)
     }
     qemu_set_fd_handler(client->fd, NULL, NULL, NULL);
     close(client->fd);
+    if (gvt_stream_control_active_client == client) {
+        gvt_stream_control_active_client = NULL;
+        gvt_stream_control_apply_stop(gvt_stream_control_display);
+    }
     if (gvt_stream_control_server) {
         gvt_stream_control_server->clients =
             g_list_remove(gvt_stream_control_server->clients, client);
@@ -1122,8 +1145,11 @@ static void gvt_stream_control_accept(void *opaque)
     GVTStreamControlServer *server = opaque;
 
     for (;;) {
-        int fd = accept(server->listen_fd, NULL, NULL);
+        struct sockaddr_in addr;
+        socklen_t addrlen = sizeof(addr);
+        int fd = accept(server->listen_fd, (struct sockaddr *)&addr, &addrlen);
         GVTStreamControlClient *client;
+        int one = 1;
 
         if (fd < 0) {
             if (errno == EINTR) {
@@ -1138,40 +1164,34 @@ static void gvt_stream_control_accept(void *opaque)
 
         qemu_set_cloexec(fd);
         gvt_stream_set_nonblock(fd);
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
         client = g_new0(GVTStreamControlClient, 1);
         client->fd = fd;
+        if (!inet_ntop(AF_INET, &addr.sin_addr, client->host,
+                       sizeof(client->host))) {
+            snprintf(client->host, sizeof(client->host), "%s", "0.0.0.0");
+        }
         client->buffer = g_string_new(NULL);
         server->clients = g_list_prepend(server->clients, client);
         server->connected++;
         qemu_set_fd_handler(fd, gvt_stream_control_client_read, NULL, client);
-        error_report("gvt-stream-control: client connected fd=%d total=%" PRIu64,
-                     fd, server->connected);
+        error_report("gvt-stream-control: client connected from %s fd=%d total=%" PRIu64,
+                     client->host, fd, server->connected);
     }
 }
 
-static void gvt_stream_control_start(void)
+static void gvt_stream_control_start(uint64_t port)
 {
-    const char *path = g_getenv("GVT_STREAM_CONTROL_SOCKET");
-    struct sockaddr_un addr = { 0 };
-    g_autofree char *dirname = NULL;
+    const char *host = g_getenv("GVT_STREAM_CONTROL_HOST") ?: "0.0.0.0";
+    struct sockaddr_in addr = { 0 };
     int fd;
 
-    if (gvt_stream_control_server) {
-        return;
-    }
-    if (!path || !*path) {
-        path = "/run/gvt-stream/qemu.sock";
-    }
-
-    dirname = g_path_get_dirname(path);
-    if (g_mkdir_with_parents(dirname, 0755) < 0) {
-        warn_report("gvt-stream-control: mkdir %s failed: %s",
-                    dirname, strerror(errno));
+    if (!port || gvt_stream_control_server) {
         return;
     }
 
-    fd = qemu_socket(AF_UNIX, SOCK_STREAM, 0);
+    fd = qemu_socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         warn_report("gvt-stream-control: socket failed: %s", strerror(errno));
         return;
@@ -1179,30 +1199,35 @@ static void gvt_stream_control_start(void)
 
     qemu_set_cloexec(fd);
     gvt_stream_set_nonblock(fd);
-    unlink(path);
+    socket_set_fast_reuse(fd);
 
-    addr.sun_family = AF_UNIX;
-    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+        warn_report("gvt-stream-control: invalid listen host %s", host);
+        close(fd);
+        return;
+    }
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        warn_report("gvt-stream-control: bind %s failed: %s",
-                    path, strerror(errno));
+        warn_report("gvt-stream-control: bind %s:%" PRIu64 " failed: %s",
+                    host, port, strerror(errno));
         close(fd);
         return;
     }
     if (listen(fd, 8) < 0) {
         warn_report("gvt-stream-control: listen failed: %s", strerror(errno));
         close(fd);
-        unlink(path);
         return;
     }
-    chmod(path, 0660);
 
     gvt_stream_control_server = g_new0(GVTStreamControlServer, 1);
     gvt_stream_control_server->listen_fd = fd;
-    gvt_stream_control_server->socket_path = g_strdup(path);
+    snprintf(gvt_stream_control_server->listen_host,
+             sizeof(gvt_stream_control_server->listen_host), "%s", host);
+    gvt_stream_control_server->listen_port = port;
     qemu_set_fd_handler(fd, gvt_stream_control_accept, NULL,
                         gvt_stream_control_server);
-    error_report("gvt-stream-control: listening on %s", path);
+    error_report("gvt-stream-control: listening on %s:%" PRIu64, host, port);
 }
 
 static void gvt_stream_fourcc_to_str(uint32_t fourcc, char out[5])
@@ -3298,7 +3323,9 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                  host, port, codec, opts->u.gvt_stream.rendernode ?: "auto");
 
     gvt_stream_input_start();
-    gvt_stream_control_start();
+    if (!host || !*host) {
+        gvt_stream_control_start(port);
+    }
 
     for (idx = 0;; idx++) {
         con = qemu_console_lookup_by_index(idx);
@@ -3426,7 +3453,8 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
             gdpy->rtp_host = g_strdup(host);
         }
         gdpy->rtp_port = gvt_stream_getenv_u64("GVT_STREAM_RTP_PORT",
-                                               port, 0, 65535);
+                                               gdpy->rtp_host ? port : 0,
+                                               0, 65535);
         gdpy->rtp_fec = gvt_stream_getenv_u64("GVT_STREAM_RTP_FEC",
                                               0, 0, 100);
         gdpy->rtp_fec_important =
