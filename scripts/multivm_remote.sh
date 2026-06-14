@@ -750,6 +750,7 @@ start_one() {
         export GVT_STREAM_SOURCE_ID="$name"
         export GVT_STREAM_INPUT_HOST=0.0.0.0
         export GVT_STREAM_INPUT_PORT="$input_port"
+        export GVT_STREAM_SPICE_PORT="$spice_port"
         export GVT_STREAM_CAPTURE_MAX=0
         export GVT_STREAM_IMPORT_TEST=${GVT_STREAM_IMPORT_TEST:-0}
         export GVT_STREAM_ENCODE_PATH=${GVT_STREAM_ENCODE_PATH:-dmabuf}

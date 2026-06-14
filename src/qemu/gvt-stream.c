@@ -227,9 +227,29 @@ static GVTStreamControlServer *gvt_stream_control_server;
 static GVTStreamDisplay *gvt_stream_control_display;
 static GVTStreamControlClient *gvt_stream_control_active_client;
 static int64_t gvt_stream_last_input_ms;
+static uint64_t gvt_stream_spice_port;
+static uint64_t gvt_stream_input_port;
 
 static void gvt_stream_encoder_finish(GVTStreamDisplay *gdpy);
 static void gvt_stream_capture_frame(GVTStreamDisplay *gdpy, int64_t now_ms);
+
+static uint64_t gvt_stream_port_slot(uint64_t control_port)
+{
+    if (control_port < 5004) {
+        return 0;
+    }
+    return (control_port - 5004) / 4;
+}
+
+static uint64_t gvt_stream_default_spice_port(uint64_t control_port)
+{
+    return 5900 + gvt_stream_port_slot(control_port);
+}
+
+static uint64_t gvt_stream_default_input_port(uint64_t control_port)
+{
+    return 5905 + gvt_stream_port_slot(control_port);
+}
 
 static uint64_t gvt_stream_getenv_u64(const char *name,
                                       uint64_t defval,
@@ -910,22 +930,25 @@ static void gvt_stream_input_accept(void *opaque)
     }
 }
 
-static void gvt_stream_input_start(void)
+static void gvt_stream_input_start(uint64_t control_port)
 {
     const char *host = g_getenv("GVT_STREAM_INPUT_HOST") ?: "0.0.0.0";
     uint64_t port = gvt_stream_getenv_u64("GVT_STREAM_INPUT_PORT",
-                                          5905, 0, 65535);
+                                          gvt_stream_input_port ?:
+                                          gvt_stream_default_input_port(control_port),
+                                          0, 65535);
     struct sockaddr_in addr = { 0 };
     int fd;
 
     if (!port || gvt_stream_input_server) {
         return;
     }
+    gvt_stream_input_port = port;
 
     fd = qemu_socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        warn_report("gvt-stream-input: socket failed: %s", strerror(errno));
-        return;
+        error_report("gvt-stream-input: socket failed: %s", strerror(errno));
+        exit(1);
     }
 
     socket_set_fast_reuse(fd);
@@ -935,20 +958,20 @@ static void gvt_stream_input_start(void)
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
-        warn_report("gvt-stream-input: invalid listen host %s", host);
+        error_report("gvt-stream-input: invalid listen host %s", host);
         close(fd);
-        return;
+        exit(1);
     }
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        warn_report("gvt-stream-input: bind %s:%" PRIu64 " failed: %s",
-                    host, port, strerror(errno));
+        error_report("gvt-stream-input: bind %s:%" PRIu64 " failed: %s",
+                     host, port, strerror(errno));
         close(fd);
-        return;
+        exit(1);
     }
     if (listen(fd, 4) < 0) {
-        warn_report("gvt-stream-input: listen failed: %s", strerror(errno));
+        error_report("gvt-stream-input: listen failed: %s", strerror(errno));
         close(fd);
-        return;
+        exit(1);
     }
 
     gvt_stream_input_server = g_new0(GVTStreamInputServer, 1);
@@ -1013,10 +1036,49 @@ static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
     gvt_stream_last_input_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     error_report("gvt-stream-control: stream target=%s:%u codec=%s",
                  gdpy->rtp_host, (unsigned)gdpy->rtp_port, gdpy->video_codec);
+    error_report("gvt-stream-control: session ports video_udp=%u spice_tcp=%" PRIu64
+                 " input_tcp=%" PRIu64,
+                 (unsigned)gdpy->rtp_port, gvt_stream_spice_port,
+                 gvt_stream_input_port);
     if (gdpy->scanout) {
         gvt_stream_capture_frame(gdpy, gvt_stream_last_input_ms);
     }
     return true;
+}
+
+static void gvt_stream_control_send_status(GVTStreamControlClient *client,
+                                           bool ok,
+                                           const char *error)
+{
+    GVTStreamDisplay *gdpy = gvt_stream_control_display;
+    char message[512];
+    ssize_t ret;
+
+    if (!client) {
+        return;
+    }
+
+    if (ok) {
+        snprintf(message, sizeof(message),
+                 "{\"ok\":true,\"video_udp\":%" PRIu64
+                 ",\"spice_tcp\":%" PRIu64
+                 ",\"input_tcp\":%" PRIu64
+                 ",\"codec\":\"%s\"}\n",
+                 gdpy ? (uint64_t)gdpy->rtp_port : 0,
+                 gvt_stream_spice_port,
+                 gvt_stream_input_port,
+                 (gdpy && gdpy->video_codec) ? gdpy->video_codec : "h265");
+    } else {
+        snprintf(message, sizeof(message),
+                 "{\"ok\":false,\"error\":\"%s\"}\n",
+                 error ?: "request failed");
+    }
+
+    ret = send(client->fd, message, strlen(message), MSG_NOSIGNAL);
+    if (ret < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        warn_report("gvt-stream-control: status send failed: %s",
+                    strerror(errno));
+    }
 }
 
 static void gvt_stream_control_process_line(GVTStreamControlClient *client,
@@ -1052,6 +1114,7 @@ static void gvt_stream_control_process_line(GVTStreamControlClient *client,
         const char *host = qdict_get_try_str(dict, "host") ?: client->host;
         const char *codec = qdict_get_try_str(dict, "codec");
         uint64_t port = qdict_get_try_int(dict, "video_port", 0);
+        bool started;
 
         if (!port) {
             port = qdict_get_try_int(dict, "port", 0);
@@ -1059,8 +1122,11 @@ static void gvt_stream_control_process_line(GVTStreamControlClient *client,
         if (!port && gvt_stream_control_server) {
             port = gvt_stream_control_server->listen_port;
         }
-        if (gvt_stream_control_apply_start(gvt_stream_control_display,
-                                           host, port, codec)) {
+        started = gvt_stream_control_apply_start(gvt_stream_control_display,
+                                                 host, port, codec);
+        gvt_stream_control_send_status(client, started,
+                                       "invalid start request");
+        if (started) {
             gvt_stream_control_active_client = client;
             gvt_stream_control_server->messages++;
         }
@@ -1178,6 +1244,10 @@ static void gvt_stream_control_accept(void *opaque)
         qemu_set_fd_handler(fd, gvt_stream_control_client_read, NULL, client);
         error_report("gvt-stream-control: client connected from %s fd=%d total=%" PRIu64,
                      client->host, fd, server->connected);
+        error_report("gvt-stream-control: advertised ports control_tcp=%" PRIu64
+                     " spice_tcp=%" PRIu64 " input_tcp=%" PRIu64,
+                     server->listen_port, gvt_stream_spice_port,
+                     gvt_stream_input_port);
     }
 }
 
@@ -1193,8 +1263,8 @@ static void gvt_stream_control_start(uint64_t port)
 
     fd = qemu_socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        warn_report("gvt-stream-control: socket failed: %s", strerror(errno));
-        return;
+        error_report("gvt-stream-control: socket failed: %s", strerror(errno));
+        exit(1);
     }
 
     qemu_set_cloexec(fd);
@@ -1204,20 +1274,20 @@ static void gvt_stream_control_start(uint64_t port)
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
-        warn_report("gvt-stream-control: invalid listen host %s", host);
+        error_report("gvt-stream-control: invalid listen host %s", host);
         close(fd);
-        return;
+        exit(1);
     }
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        warn_report("gvt-stream-control: bind %s:%" PRIu64 " failed: %s",
-                    host, port, strerror(errno));
+        error_report("gvt-stream-control: bind %s:%" PRIu64 " failed: %s",
+                     host, port, strerror(errno));
         close(fd);
-        return;
+        exit(1);
     }
     if (listen(fd, 8) < 0) {
-        warn_report("gvt-stream-control: listen failed: %s", strerror(errno));
+        error_report("gvt-stream-control: listen failed: %s", strerror(errno));
         close(fd);
-        return;
+        exit(1);
     }
 
     gvt_stream_control_server = g_new0(GVTStreamControlServer, 1);
@@ -1228,6 +1298,10 @@ static void gvt_stream_control_start(uint64_t port)
     qemu_set_fd_handler(fd, gvt_stream_control_accept, NULL,
                         gvt_stream_control_server);
     error_report("gvt-stream-control: listening on %s:%" PRIu64, host, port);
+    error_report("gvt-stream-control: port map control_tcp=%" PRIu64
+                 " video_udp=client-request spice_tcp=%" PRIu64
+                 " input_tcp=%" PRIu64,
+                 port, gvt_stream_spice_port, gvt_stream_input_port);
 }
 
 static void gvt_stream_fourcc_to_str(uint32_t fourcc, char out[5])
@@ -3319,10 +3393,19 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
     uint16_t port = opts->u.gvt_stream.has_port ? opts->u.gvt_stream.port : 0;
     int idx;
 
-    error_report("gvt-stream: init host=%s port=%u codec=%s rendernode=%s",
-                 host, port, codec, opts->u.gvt_stream.rendernode ?: "auto");
-
-    gvt_stream_input_start();
+    gvt_stream_spice_port =
+        gvt_stream_getenv_u64("GVT_STREAM_SPICE_PORT",
+                              gvt_stream_default_spice_port(port),
+                              0, 65535);
+    gvt_stream_input_port =
+        gvt_stream_getenv_u64("GVT_STREAM_INPUT_PORT",
+                              gvt_stream_default_input_port(port),
+                              0, 65535);
+    error_report("gvt-stream: init host=%s port=%u codec=%s rendernode=%s "
+                 "spice_tcp=%" PRIu64 " input_tcp=%" PRIu64,
+                 host, port, codec, opts->u.gvt_stream.rendernode ?: "auto",
+                 gvt_stream_spice_port, gvt_stream_input_port);
+    gvt_stream_input_start(port);
     if (!host || !*host) {
         gvt_stream_control_start(port);
     }
