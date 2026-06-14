@@ -927,6 +927,7 @@ static void gvt_stream_input_accept(void *opaque)
         qemu_set_fd_handler(fd, gvt_stream_input_client_read, NULL, client);
         error_report("gvt-stream-input: client connected from %s fd=%d total=%" PRIu64,
                      inet_ntoa(addr.sin_addr), fd, server->connected);
+        gvt_stream_input_client_read(client);
     }
 }
 
@@ -1248,6 +1249,15 @@ static void gvt_stream_control_accept(void *opaque)
                      " spice_tcp=%" PRIu64 " input_tcp=%" PRIu64,
                      server->listen_port, gvt_stream_spice_port,
                      gvt_stream_input_port);
+        /*
+         * Most clients send START immediately after connect.  Drain that first
+         * line here as well as via the fd handler so the protocol does not
+         * depend on a second readability wakeup after accept.
+         */
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        if (poll(&pfd, 1, 1000) > 0 && (pfd.revents & POLLIN)) {
+            gvt_stream_control_client_read(client);
+        }
     }
 }
 
