@@ -1043,6 +1043,8 @@ static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
                  gvt_stream_input_port);
     if (gdpy->scanout) {
         gvt_stream_capture_frame(gdpy, gvt_stream_last_input_ms);
+    } else {
+        warn_report("gvt-stream-control: stream armed but no dmabuf scanout yet");
     }
     return true;
 }
@@ -3210,6 +3212,7 @@ static void gvt_stream_scanout_dmabuf(DisplayChangeListener *dcl,
             error_report("gvt-stream: import-test unavailable without GBM");
 #endif
     }
+    gvt_stream_capture_frame(gdpy, now_ms);
     gvt_stream_publish_snapshot_dmabuf(gdpy, dmabuf, now_ms, true);
 }
 
