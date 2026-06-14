@@ -186,6 +186,8 @@ typedef struct GVTStreamDisplay {
 } GVTStreamDisplay;
 
 typedef struct GVTStreamInputServer GVTStreamInputServer;
+typedef struct GVTStreamControlClient GVTStreamControlClient;
+typedef struct GVTStreamControlServer GVTStreamControlServer;
 
 typedef struct GVTStreamInputClient {
     GVTStreamInputServer *server;
@@ -202,10 +204,28 @@ struct GVTStreamInputServer {
     uint64_t parse_errors;
 };
 
+struct GVTStreamControlClient {
+    int fd;
+    GString *buffer;
+};
+
+struct GVTStreamControlServer {
+    int listen_fd;
+    char *socket_path;
+    GList *clients;
+    uint64_t connected;
+    uint64_t messages;
+    uint64_t parse_errors;
+};
+
 static const DisplayChangeListenerOps gvt_stream_ops;
 static GVTStreamInputServer *gvt_stream_input_server;
 static GVTStreamDisplay *gvt_stream_input_display;
+static GVTStreamControlServer *gvt_stream_control_server;
+static GVTStreamDisplay *gvt_stream_control_display;
 static int64_t gvt_stream_last_input_ms;
+
+static void gvt_stream_encoder_finish(GVTStreamDisplay *gdpy);
 
 static uint64_t gvt_stream_getenv_u64(const char *name,
                                       uint64_t defval,
@@ -890,7 +910,7 @@ static void gvt_stream_input_start(void)
 {
     const char *host = g_getenv("GVT_STREAM_INPUT_HOST") ?: "0.0.0.0";
     uint64_t port = gvt_stream_getenv_u64("GVT_STREAM_INPUT_PORT",
-                                          0, 0, 65535);
+                                          5905, 0, 65535);
     struct sockaddr_in addr = { 0 };
     int fd;
 
@@ -932,6 +952,257 @@ static void gvt_stream_input_start(void)
     qemu_set_fd_handler(fd, gvt_stream_input_accept, NULL,
                         gvt_stream_input_server);
     error_report("gvt-stream-input: listening on %s:%" PRIu64, host, port);
+}
+
+static void gvt_stream_control_apply_stop(GVTStreamDisplay *gdpy)
+{
+    if (!gdpy) {
+        return;
+    }
+    if (gdpy->encode_pipeline) {
+        gvt_stream_encoder_finish(gdpy);
+    }
+    g_clear_pointer(&gdpy->rtp_host, g_free);
+    gdpy->rtp_port = 0;
+    gdpy->encode_pts = 0;
+    gdpy->last_encode_wall_ms = 0;
+    error_report("gvt-stream-control: stream stopped");
+}
+
+static void gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
+                                           const char *host,
+                                           uint64_t port,
+                                           const char *codec)
+{
+    bool changed;
+
+    if (!gdpy || !host || !*host || !port) {
+        warn_report("gvt-stream-control: ignoring invalid START target");
+        return;
+    }
+    if (codec && *codec &&
+        g_ascii_strcasecmp(codec, "h264") &&
+        g_ascii_strcasecmp(codec, "h265") &&
+        g_ascii_strcasecmp(codec, "hevc")) {
+        warn_report("gvt-stream-control: ignoring invalid codec %s", codec);
+        codec = NULL;
+    }
+
+    changed = g_strcmp0(gdpy->rtp_host, host) ||
+              gdpy->rtp_port != port ||
+              (codec && *codec && g_ascii_strcasecmp(gdpy->video_codec, codec));
+    if (changed && gdpy->encode_pipeline) {
+        gvt_stream_encoder_finish(gdpy);
+    }
+
+    g_free(gdpy->rtp_host);
+    gdpy->rtp_host = g_strdup(host);
+    gdpy->rtp_port = port;
+    if (codec && *codec) {
+        g_free(gdpy->video_codec);
+        gdpy->video_codec = g_strdup(!g_ascii_strcasecmp(codec, "hevc") ?
+                                     "h265" : codec);
+    }
+    gdpy->encode_pts = 0;
+    gdpy->last_encode_wall_ms = 0;
+    gdpy->last_capture_ms = 0;
+    gvt_stream_last_input_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    error_report("gvt-stream-control: stream target=%s:%u codec=%s",
+                 gdpy->rtp_host, (unsigned)gdpy->rtp_port, gdpy->video_codec);
+}
+
+static void gvt_stream_control_process_line(GVTStreamControlClient *client,
+                                            const char *line)
+{
+    Error *err = NULL;
+    QObject *obj;
+    QDict *dict;
+    const char *type;
+
+    if (!line || !*line) {
+        return;
+    }
+
+    obj = qobject_from_json(line, &err);
+    if (err) {
+        gvt_stream_control_server->parse_errors++;
+        warn_report("gvt-stream-control: json parse failed: %s",
+                    error_get_pretty(err));
+        error_free(err);
+        return;
+    }
+
+    dict = qobject_to(QDict, obj);
+    if (!dict) {
+        gvt_stream_control_server->parse_errors++;
+        qobject_unref(obj);
+        return;
+    }
+
+    type = qdict_get_try_str(dict, "type");
+    if (!g_strcmp0(type, "start")) {
+        const char *host = qdict_get_try_str(dict, "host");
+        const char *codec = qdict_get_try_str(dict, "codec");
+        uint64_t port = qdict_get_try_int(dict, "port", 0);
+
+        gvt_stream_control_apply_start(gvt_stream_control_display,
+                                       host, port, codec);
+        gvt_stream_control_server->messages++;
+    } else if (!g_strcmp0(type, "stop")) {
+        gvt_stream_control_apply_stop(gvt_stream_control_display);
+        gvt_stream_control_server->messages++;
+    } else {
+        gvt_stream_control_server->parse_errors++;
+        warn_report("gvt-stream-control: ignoring unknown type=%s",
+                    type ?: "");
+    }
+
+    qobject_unref(obj);
+}
+
+static void gvt_stream_control_client_close(GVTStreamControlClient *client)
+{
+    if (!client) {
+        return;
+    }
+    qemu_set_fd_handler(client->fd, NULL, NULL, NULL);
+    close(client->fd);
+    if (gvt_stream_control_server) {
+        gvt_stream_control_server->clients =
+            g_list_remove(gvt_stream_control_server->clients, client);
+    }
+    g_string_free(client->buffer, TRUE);
+    g_free(client);
+}
+
+static void gvt_stream_control_client_read(void *opaque)
+{
+    GVTStreamControlClient *client = opaque;
+    char tmp[4096];
+
+    for (;;) {
+        ssize_t ret = read(client->fd, tmp, sizeof(tmp));
+
+        if (ret > 0) {
+            char *nl;
+
+            g_string_append_len(client->buffer, tmp, ret);
+            while ((nl = strchr(client->buffer->str, '\n'))) {
+                g_autofree char *line =
+                    g_strndup(client->buffer->str, nl - client->buffer->str);
+                g_string_erase(client->buffer, 0,
+                               nl - client->buffer->str + 1);
+                gvt_stream_control_process_line(client, line);
+            }
+            if (client->buffer->len > 1024 * 1024) {
+                gvt_stream_control_server->parse_errors++;
+                warn_report("gvt-stream-control: closing oversized client buffer");
+                gvt_stream_control_client_close(client);
+                return;
+            }
+            continue;
+        }
+        if (ret == 0) {
+            gvt_stream_control_client_close(client);
+            return;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return;
+        }
+        gvt_stream_control_client_close(client);
+        return;
+    }
+}
+
+static void gvt_stream_control_accept(void *opaque)
+{
+    GVTStreamControlServer *server = opaque;
+
+    for (;;) {
+        int fd = accept(server->listen_fd, NULL, NULL);
+        GVTStreamControlClient *client;
+
+        if (fd < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                warn_report("gvt-stream-control: accept failed: %s",
+                            strerror(errno));
+            }
+            return;
+        }
+
+        qemu_set_cloexec(fd);
+        gvt_stream_set_nonblock(fd);
+
+        client = g_new0(GVTStreamControlClient, 1);
+        client->fd = fd;
+        client->buffer = g_string_new(NULL);
+        server->clients = g_list_prepend(server->clients, client);
+        server->connected++;
+        qemu_set_fd_handler(fd, gvt_stream_control_client_read, NULL, client);
+        error_report("gvt-stream-control: client connected fd=%d total=%" PRIu64,
+                     fd, server->connected);
+    }
+}
+
+static void gvt_stream_control_start(void)
+{
+    const char *path = g_getenv("GVT_STREAM_CONTROL_SOCKET");
+    struct sockaddr_un addr = { 0 };
+    g_autofree char *dirname = NULL;
+    int fd;
+
+    if (gvt_stream_control_server) {
+        return;
+    }
+    if (!path || !*path) {
+        path = "/run/gvt-stream/qemu.sock";
+    }
+
+    dirname = g_path_get_dirname(path);
+    if (g_mkdir_with_parents(dirname, 0755) < 0) {
+        warn_report("gvt-stream-control: mkdir %s failed: %s",
+                    dirname, strerror(errno));
+        return;
+    }
+
+    fd = qemu_socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        warn_report("gvt-stream-control: socket failed: %s", strerror(errno));
+        return;
+    }
+
+    qemu_set_cloexec(fd);
+    gvt_stream_set_nonblock(fd);
+    unlink(path);
+
+    addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        warn_report("gvt-stream-control: bind %s failed: %s",
+                    path, strerror(errno));
+        close(fd);
+        return;
+    }
+    if (listen(fd, 8) < 0) {
+        warn_report("gvt-stream-control: listen failed: %s", strerror(errno));
+        close(fd);
+        unlink(path);
+        return;
+    }
+    chmod(path, 0660);
+
+    gvt_stream_control_server = g_new0(GVTStreamControlServer, 1);
+    gvt_stream_control_server->listen_fd = fd;
+    gvt_stream_control_server->socket_path = g_strdup(path);
+    qemu_set_fd_handler(fd, gvt_stream_control_accept, NULL,
+                        gvt_stream_control_server);
+    error_report("gvt-stream-control: listening on %s", path);
 }
 
 static void gvt_stream_fourcc_to_str(uint32_t fourcc, char out[5])
@@ -3027,6 +3298,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                  host, port, codec, opts->u.gvt_stream.rendernode ?: "auto");
 
     gvt_stream_input_start();
+    gvt_stream_control_start();
 
     for (idx = 0;; idx++) {
         con = qemu_console_lookup_by_index(idx);
@@ -3049,7 +3321,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
             g_clear_pointer(&gdpy->capture_dir, g_free);
         }
         gdpy->capture_ms = gvt_stream_getenv_u64("GVT_STREAM_CAPTURE_MS",
-                                                 1000, 16, 60000);
+                                                 16, 16, 60000);
         gdpy->idle_capture_ms =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_CAPTURE_MS",
                                   gdpy->capture_ms, 16, 60000);
@@ -3058,10 +3330,10 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                                   gdpy->idle_capture_ms, 0, 60000);
         gdpy->idle_after_ms =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_AFTER_MS",
-                                  1000, 0, 60000);
+                                  0, 0, 60000);
         gdpy->idle_probe_ms =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_PROBE_MS",
-                                  250, 0, 60000);
+                                  0, 0, 60000);
         gdpy->idle_changed_ppm =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_CHANGED_PPM",
                                   3000, 0, 1000000);
@@ -3069,15 +3341,15 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_PIXEL_DELTA",
                                   8, 0, 255);
         gdpy->capture_max = gvt_stream_getenv_u64("GVT_STREAM_CAPTURE_MAX",
-                                                  5, 0, 1000000);
+                                                  0, 0, 1000000);
         gdpy->encode_file = g_strdup(g_getenv("GVT_STREAM_ENCODE_FILE"));
         if (gdpy->encode_file && !*gdpy->encode_file) {
             g_clear_pointer(&gdpy->encode_file, g_free);
         }
         gdpy->encode_max = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_MAX",
-                                                 120, 0, 1000000);
+                                                 0, 0, 1000000);
         gdpy->encode_fps = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_FPS",
-                                                 30, 1, 120);
+                                                 60, 1, 120);
         gdpy->encode_bitrate = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_BITRATE",
                                                      12000, 256, 100000);
         gdpy->encode_idle_bitrate =
@@ -3105,8 +3377,14 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
             gdpy->encode_still_bitrate = gdpy->encode_bitrate;
         }
         gdpy->encode_keyint = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_KEYINT",
-                                                    30, 1, 300);
-        gdpy->video_codec = g_strdup(g_getenv("GVT_STREAM_VIDEO_CODEC") ?: "h265");
+                                                    60, 1, 300);
+        {
+            const char *env_codec = g_getenv("GVT_STREAM_VIDEO_CODEC");
+            const char *display_codec =
+                (codec && *codec && g_ascii_strcasecmp(codec, "diag")) ?
+                codec : "h265";
+            gdpy->video_codec = g_strdup(env_codec ?: display_codec);
+        }
         if (g_ascii_strcasecmp(gdpy->video_codec, "h264") &&
             g_ascii_strcasecmp(gdpy->video_codec, "h265") &&
             g_ascii_strcasecmp(gdpy->video_codec, "hevc")) {
@@ -3124,7 +3402,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
             gvt_stream_getenv_bool("GVT_STREAM_DMABUF_CAPS_FEATURE", false);
         {
             const char *path = g_getenv("GVT_STREAM_ENCODE_PATH");
-            gdpy->encode_dmabuf = path && !g_ascii_strcasecmp(path, "dmabuf");
+            gdpy->encode_dmabuf = !path || !g_ascii_strcasecmp(path, "dmabuf");
         }
         gdpy->rtp_host = g_strdup(g_getenv("GVT_STREAM_RTP_HOST"));
         if (gdpy->rtp_host && !*gdpy->rtp_host) {
@@ -3140,6 +3418,9 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         }
         if (!gvt_stream_input_display) {
             gvt_stream_input_display = gdpy;
+        }
+        if (!gvt_stream_control_display) {
+            gvt_stream_control_display = gdpy;
         }
         if (!gdpy->rtp_host && host && *host && port) {
             gdpy->rtp_host = g_strdup(host);
