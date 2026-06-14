@@ -5,7 +5,7 @@ usage() {
   cat <<'EOF'
 Usage:
   gvt-qemu-win10.sh --client CLIENT_IP [--port 5004] [--spice-port 5900]
-                   [--input-port 5905] [--codec h265] [--mode realtime|powersave]
+                   [--input-port 5905] [--codec h264] [--mode realtime|powersave]
 
 Starts the current Windows 10 GVT-g desktop with one user-facing command.
 The display backend is still QEMU gvt-stream; this wrapper only hides the
@@ -17,7 +17,7 @@ CLIENT_HOST=""
 VIDEO_PORT=5004
 SPICE_PORT=5900
 INPUT_PORT=5905
-CODEC=h265
+CODEC=h264
 MODE=realtime
 RUN_SCRIPT=${GVT_QEMU_RUN_SCRIPT:-/root/qemu_cmd/run-win10-gvt-stream-diag.sh}
 
@@ -109,7 +109,7 @@ export GVT_STREAM_SPICE_AUDIO_PORT="$SPICE_PORT"
 export GVT_STREAM_VIDEO_CODEC="$CODEC"
 export GVT_STREAM_ENCODE_PATH=${GVT_STREAM_ENCODE_PATH:-dmabuf}
 export GVT_STREAM_ENCODE_FPS=${GVT_STREAM_ENCODE_FPS:-60}
-export GVT_STREAM_ENCODE_BITRATE=${GVT_STREAM_ENCODE_BITRATE:-12000}
+export GVT_STREAM_ENCODE_BITRATE=${GVT_STREAM_ENCODE_BITRATE:-18000}
 export GVT_STREAM_ENCODE_KEYINT=${GVT_STREAM_ENCODE_KEYINT:-60}
 export GVT_STREAM_IMPORT_TEST=${GVT_STREAM_IMPORT_TEST:-0}
 

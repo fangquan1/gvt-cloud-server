@@ -42,7 +42,7 @@ The default Windows 10 baseline publishes:
 - native input port `5905`
 
 The underlying QEMU display option is still explicit in the generated command:
-`-display gvt-stream,rendernode=/dev/dri/renderD128,codec=h265,port=5004`.
+`-display gvt-stream,rendernode=/dev/dri/renderD128,codec=h264,port=5004`.
 
 Control plane MVP:
 

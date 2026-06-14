@@ -1073,7 +1073,7 @@ static void gvt_stream_control_send_status(GVTStreamControlClient *client,
                  gdpy ? (uint64_t)gdpy->rtp_port : 0,
                  gvt_stream_spice_port,
                  gvt_stream_input_port,
-                 (gdpy && gdpy->video_codec) ? gdpy->video_codec : "h265");
+                 (gdpy && gdpy->video_codec) ? gdpy->video_codec : "h264");
     } else {
         snprintf(message, sizeof(message),
                  "{\"ok\":false,\"error\":\"%s\"}\n",
@@ -3508,7 +3508,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->encode_fps = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_FPS",
                                                  60, 1, 120);
         gdpy->encode_bitrate = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_BITRATE",
-                                                     12000, 256, 100000);
+                                                    18000, 256, 100000);
         gdpy->encode_idle_bitrate =
             gvt_stream_getenv_u64("GVT_STREAM_ENCODE_IDLE_BITRATE",
                                   0, 0, 100000);
@@ -3539,16 +3539,16 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
             const char *env_codec = g_getenv("GVT_STREAM_VIDEO_CODEC");
             const char *display_codec =
                 (codec && *codec && g_ascii_strcasecmp(codec, "diag")) ?
-                codec : "h265";
+                codec : "h264";
             gdpy->video_codec = g_strdup(env_codec ?: display_codec);
         }
         if (g_ascii_strcasecmp(gdpy->video_codec, "h264") &&
             g_ascii_strcasecmp(gdpy->video_codec, "h265") &&
             g_ascii_strcasecmp(gdpy->video_codec, "hevc")) {
-            warn_report("gvt-stream: unknown codec %s, falling back to h265",
+            warn_report("gvt-stream: unknown codec %s, falling back to h264",
                         gdpy->video_codec);
             g_free(gdpy->video_codec);
-            gdpy->video_codec = g_strdup("h265");
+            gdpy->video_codec = g_strdup("h264");
         }
         if (!g_ascii_strcasecmp(gdpy->video_codec, "hevc")) {
             g_free(gdpy->video_codec);
