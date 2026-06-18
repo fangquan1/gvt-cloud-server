@@ -3524,7 +3524,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->dcl.con = con;
         gdpy->dcl.ops = &gvt_stream_ops;
         gdpy->refresh_ms = gvt_stream_getenv_u64("GVT_STREAM_REFRESH_MS",
-                                                 16, 1, 1000);
+                                                 17, 1, 1000);
         gdpy->report_ms = gvt_stream_getenv_u64("GVT_STREAM_REPORT_MS",
                                                 1000, 100, 60000);
         gdpy->verbose = gvt_stream_getenv_bool("GVT_STREAM_VERBOSE", false);
@@ -3534,7 +3534,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
             g_clear_pointer(&gdpy->capture_dir, g_free);
         }
         gdpy->capture_ms = gvt_stream_getenv_u64("GVT_STREAM_CAPTURE_MS",
-                                                 16, 16, 60000);
+                                                 17, 16, 60000);
         gdpy->idle_capture_ms =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_CAPTURE_MS",
                                   gdpy->capture_ms, 16, 60000);
@@ -3562,7 +3562,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->encode_max = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_MAX",
                                                  0, 0, 1000000);
         gdpy->encode_fps = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_FPS",
-                                                 60, 1, 120);
+                                                 59, 1, 120);
         gdpy->encode_bitrate = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_BITRATE",
                                                     18000, 256, 100000);
         gdpy->encode_idle_bitrate =
@@ -3590,7 +3590,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
             gdpy->encode_still_bitrate = gdpy->encode_bitrate;
         }
         gdpy->encode_keyint = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_KEYINT",
-                                                    60, 1, 300);
+                                                    59, 1, 300);
         {
             const char *env_codec = g_getenv("GVT_STREAM_VIDEO_CODEC");
             const char *display_codec =

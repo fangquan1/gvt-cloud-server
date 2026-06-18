@@ -118,6 +118,7 @@ export GVT_STREAM_IMPORT_TEST={1 if args.import_test else 0}
 export GVT_STREAM_ENCODE_PATH={args.path}
 export GVT_STREAM_ENCODE_FLIP={1 if args.flip else 0}
 export GVT_STREAM_DMABUF_CAPS_FEATURE={1 if args.dmabuf_caps_feature else 0}
+export GVT_STREAM_REFRESH_MS={args.refresh_ms}
 export GVT_STREAM_CAPTURE_MS={args.capture_ms}
 export GVT_STREAM_IDLE_CAPTURE_MS={args.idle_capture_ms}
 export GVT_STREAM_IDLE_AFTER_MS={args.idle_after_ms}
@@ -180,7 +181,7 @@ def main() -> None:
     p = sub.add_parser("start")
     p.add_argument("--client-host")
     p.add_argument("--port", type=int, default=5004)
-    p.add_argument("--fps", type=int, default=60)
+    p.add_argument("--fps", type=int, default=59)
     p.add_argument("--bitrate", type=int, default=18000)
     p.add_argument("--video-codec", choices=["h264", "h265"], default="h264")
     p.add_argument("--keyint", type=int)
@@ -188,8 +189,9 @@ def main() -> None:
     p.add_argument("--flip", action="store_true")
     p.add_argument("--import-test", action="store_true")
     p.add_argument("--dmabuf-caps-feature", action="store_true")
-    p.add_argument("--capture-ms", type=int, default=16)
-    p.add_argument("--idle-capture-ms", type=int, default=16)
+    p.add_argument("--refresh-ms", type=int, default=17)
+    p.add_argument("--capture-ms", type=int, default=17)
+    p.add_argument("--idle-capture-ms", type=int, default=17)
     p.add_argument("--idle-after-ms", type=int, default=0)
     p.add_argument("--idle-probe-ms", type=int, default=0)
     p.add_argument("--idle-changed-ppm", type=int, default=3000)

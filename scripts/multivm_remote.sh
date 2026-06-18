@@ -742,7 +742,7 @@ start_one() {
         export LIBVA_DRIVER_NAME=iHD
         export LIBVA_DRIVERS_PATH=/usr/lib64/dri:/usr/local/lib64/dri
         export GST_VAAPI_ALL_DRIVERS=1
-        export GVT_STREAM_REFRESH_MS=16
+        export GVT_STREAM_REFRESH_MS=17
         export GVT_STREAM_REPORT_MS=5000
         export GVT_STREAM_VERBOSE=0
         export GVT_STREAM_KMS_DEVICE=/dev/dri/card0
@@ -756,14 +756,14 @@ start_one() {
         export GVT_STREAM_ENCODE_PATH=${GVT_STREAM_ENCODE_PATH:-dmabuf}
         export GVT_STREAM_DMABUF_CAPS_FEATURE=${GVT_STREAM_DMABUF_CAPS_FEATURE:-0}
         export GVT_STREAM_ENCODE_MAX=0
-        export GVT_STREAM_CAPTURE_MS=16
+        export GVT_STREAM_CAPTURE_MS=17
         export GVT_STREAM_IDLE_CHANGED_PPM=3000
         export GVT_STREAM_IDLE_PIXEL_DELTA=8
         case "$vm_mode" in
             realtime)
-                export GVT_STREAM_CAPTURE_MS=16
-                export GVT_STREAM_IDLE_CAPTURE_MS=16
-                export GVT_STREAM_IDLE_STILL_CAPTURE_MS=16
+                export GVT_STREAM_CAPTURE_MS=17
+                export GVT_STREAM_IDLE_CAPTURE_MS=17
+                export GVT_STREAM_IDLE_STILL_CAPTURE_MS=17
                 export GVT_STREAM_IDLE_AFTER_MS=0
                 export GVT_STREAM_IDLE_PROBE_MS=0
                 ;;
@@ -775,23 +775,23 @@ start_one() {
                 export GVT_STREAM_IDLE_PROBE_MS=0
                 ;;
             power_save)
-                export GVT_STREAM_CAPTURE_MS=16
+                export GVT_STREAM_CAPTURE_MS=17
                 export GVT_STREAM_IDLE_CAPTURE_MS=66
                 export GVT_STREAM_IDLE_STILL_CAPTURE_MS=66
                 export GVT_STREAM_IDLE_AFTER_MS=1500
                 export GVT_STREAM_IDLE_PROBE_MS=500
                 ;;
             adaptive)
-                export GVT_STREAM_CAPTURE_MS=16
+                export GVT_STREAM_CAPTURE_MS=17
                 export GVT_STREAM_IDLE_CAPTURE_MS=66
                 export GVT_STREAM_IDLE_STILL_CAPTURE_MS=1000
                 export GVT_STREAM_IDLE_AFTER_MS=2000
                 export GVT_STREAM_IDLE_PROBE_MS=1000
                 ;;
             physical)
-                export GVT_STREAM_CAPTURE_MS=16
-                export GVT_STREAM_IDLE_CAPTURE_MS=16
-                export GVT_STREAM_IDLE_STILL_CAPTURE_MS=16
+                export GVT_STREAM_CAPTURE_MS=17
+                export GVT_STREAM_IDLE_CAPTURE_MS=17
+                export GVT_STREAM_IDLE_STILL_CAPTURE_MS=17
                 export GVT_STREAM_IDLE_AFTER_MS=0
                 export GVT_STREAM_IDLE_PROBE_MS=0
                 ;;
@@ -814,7 +814,7 @@ start_one() {
             export GVT_STREAM_RTP_PORT="$video_port"
             export GVT_STREAM_RTP_FEC=0
             export GVT_STREAM_RTP_FEC_IMPORTANT=0
-            export GVT_STREAM_ENCODE_FPS=60
+            export GVT_STREAM_ENCODE_FPS=59
             export GVT_STREAM_ENCODE_BITRATE=18000
             if [ "$vm_mode" = "adaptive" ]; then
                 export GVT_STREAM_ENCODE_RATE_CONTROL=${GVT_STREAM_ENCODE_RATE_CONTROL:-vbr}
@@ -825,7 +825,7 @@ start_one() {
                 export GVT_STREAM_ENCODE_IDLE_BITRATE=${GVT_STREAM_ENCODE_IDLE_BITRATE:-0}
                 export GVT_STREAM_ENCODE_STILL_BITRATE=${GVT_STREAM_ENCODE_STILL_BITRATE:-0}
             fi
-            export GVT_STREAM_ENCODE_KEYINT=60
+            export GVT_STREAM_ENCODE_KEYINT=59
             export GVT_STREAM_VIDEO_CODEC=${GVT_STREAM_VIDEO_CODEC:-h264}
         else
             unset GVT_STREAM_RTP_HOST GVT_STREAM_RTP_PORT

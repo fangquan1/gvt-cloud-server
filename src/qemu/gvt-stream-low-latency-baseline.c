@@ -1608,7 +1608,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->dcl.con = con;
         gdpy->dcl.ops = &gvt_stream_ops;
         gdpy->refresh_ms = gvt_stream_getenv_u64("GVT_STREAM_REFRESH_MS",
-                                                 16, 1, 1000);
+                                                 17, 1, 1000);
         gdpy->report_ms = gvt_stream_getenv_u64("GVT_STREAM_REPORT_MS",
                                                 1000, 100, 60000);
         gdpy->verbose = gvt_stream_getenv_bool("GVT_STREAM_VERBOSE", false);
@@ -1618,16 +1618,16 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
             g_clear_pointer(&gdpy->capture_dir, g_free);
         }
         gdpy->capture_ms = gvt_stream_getenv_u64("GVT_STREAM_CAPTURE_MS",
-                                                 1000, 16, 60000);
+                                                 17, 16, 60000);
         gdpy->idle_capture_ms =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_CAPTURE_MS",
                                   gdpy->capture_ms, 16, 60000);
         gdpy->idle_after_ms =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_AFTER_MS",
-                                  1000, 0, 60000);
+                                  0, 0, 60000);
         gdpy->idle_probe_ms =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_PROBE_MS",
-                                  250, 0, 60000);
+                                  0, 0, 60000);
         gdpy->idle_changed_ppm =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_CHANGED_PPM",
                                   3000, 0, 1000000);
@@ -1635,19 +1635,19 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_PIXEL_DELTA",
                                   8, 0, 255);
         gdpy->capture_max = gvt_stream_getenv_u64("GVT_STREAM_CAPTURE_MAX",
-                                                  5, 0, 1000000);
+                                                  0, 0, 1000000);
         gdpy->encode_file = g_strdup(g_getenv("GVT_STREAM_ENCODE_FILE"));
         if (gdpy->encode_file && !*gdpy->encode_file) {
             g_clear_pointer(&gdpy->encode_file, g_free);
         }
         gdpy->encode_max = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_MAX",
-                                                 120, 0, 1000000);
+                                                 0, 0, 1000000);
         gdpy->encode_fps = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_FPS",
-                                                 30, 1, 120);
+                                                 59, 1, 120);
         gdpy->encode_bitrate = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_BITRATE",
-                                                     12000, 256, 100000);
+                                                     18000, 256, 100000);
         gdpy->encode_keyint = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_KEYINT",
-                                                    30, 1, 300);
+                                                    59, 1, 300);
         gdpy->encode_flip = gvt_stream_getenv_bool("GVT_STREAM_ENCODE_FLIP", false);
         gdpy->encode_dmabuf_caps_feature =
             gvt_stream_getenv_bool("GVT_STREAM_DMABUF_CAPS_FEATURE", false);
