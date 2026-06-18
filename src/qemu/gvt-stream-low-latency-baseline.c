@@ -31,11 +31,6 @@
 #include "ui/egl-context.h"
 #include "ui/egl-helpers.h"
 
-#define GVT_STREAM_IDLE_SAMPLE_W 64
-#define GVT_STREAM_IDLE_SAMPLE_H 36
-#define GVT_STREAM_IDLE_SAMPLE_N \
-    (GVT_STREAM_IDLE_SAMPLE_W * GVT_STREAM_IDLE_SAMPLE_H)
-
 typedef struct GVTStreamDisplay {
     DisplayChangeListener dcl;
     QemuDmaBuf *scanout;
@@ -55,20 +50,10 @@ typedef struct GVTStreamDisplay {
     uint64_t capture_ms;
     uint64_t idle_capture_ms;
     uint64_t idle_after_ms;
-    uint64_t idle_probe_ms;
-    uint64_t idle_changed_ppm;
-    uint64_t idle_pixel_delta;
     uint64_t capture_max;
     uint64_t last_capture_checksum;
     int64_t last_capture_ms;
     int64_t last_activity_ms;
-    int64_t last_content_change_ms;
-    int64_t last_probe_ms;
-    uint64_t last_probe_diff_ppm;
-    uint64_t idle_probe_count;
-    uint64_t idle_wake_count;
-    bool idle_sample_valid;
-    uint32_t idle_sample[GVT_STREAM_IDLE_SAMPLE_N];
     uint64_t encode_count;
     uint64_t encode_fail_count;
     uint64_t encode_max;
@@ -79,6 +64,7 @@ typedef struct GVTStreamDisplay {
     int encode_bitrate;
     int encode_keyint;
     uint64_t rtp_port;
+    uint64_t rtp_mtu;
     uint64_t rtp_fec;
     uint64_t rtp_fec_important;
     uint64_t encode_dmabuf_count;
@@ -118,7 +104,6 @@ struct GVTStreamInputServer {
 
 static const DisplayChangeListenerOps gvt_stream_ops;
 static GVTStreamInputServer *gvt_stream_input_server;
-static int64_t gvt_stream_last_input_ms;
 
 static uint64_t gvt_stream_getenv_u64(const char *name,
                                       uint64_t defval,
@@ -175,20 +160,11 @@ static bool gvt_stream_getenv_bool(const char *name, bool defval)
 static uint64_t gvt_stream_effective_capture_ms(GVTStreamDisplay *gdpy,
                                                 int64_t now_ms)
 {
-    int64_t last_activity_ms = gdpy->last_activity_ms;
-
-    if (gdpy->last_content_change_ms > last_activity_ms) {
-        last_activity_ms = gdpy->last_content_change_ms;
-    }
-    if (gvt_stream_last_input_ms > last_activity_ms) {
-        last_activity_ms = gvt_stream_last_input_ms;
-    }
-
     if (gdpy->idle_capture_ms <= gdpy->capture_ms ||
-        !gdpy->idle_after_ms || !last_activity_ms) {
+        !gdpy->idle_after_ms || !gdpy->last_activity_ms) {
         return gdpy->capture_ms;
     }
-    if (now_ms - last_activity_ms <= gdpy->idle_after_ms) {
+    if (now_ms - gdpy->last_activity_ms <= gdpy->idle_after_ms) {
         return gdpy->capture_ms;
     }
     return gdpy->idle_capture_ms;
@@ -418,7 +394,6 @@ static void gvt_stream_input_process_line(GVTStreamInputClient *client,
         return;
     }
 
-    gvt_stream_last_input_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     gvt_stream_input_process_dict(server, dict);
     qemu_input_event_sync();
     server->messages++;
@@ -673,125 +648,6 @@ static uint64_t gvt_stream_checksum_surface(DisplaySurface *surface)
     return hash;
 }
 
-static void gvt_stream_update_idle_sample(GVTStreamDisplay *gdpy,
-                                          DisplaySurface *surface,
-                                          int64_t now_ms)
-{
-    uint8_t *data = surface_data(surface);
-    int width = surface_width(surface);
-    int height = surface_height(surface);
-    int stride = surface_stride(surface);
-    uint32_t sample[GVT_STREAM_IDLE_SAMPLE_N];
-    uint64_t changed = 0;
-    int x, y, sx, sy, idx;
-
-    if (!data || width <= 0 || height <= 0) {
-        return;
-    }
-
-    for (sy = 0; sy < GVT_STREAM_IDLE_SAMPLE_H; sy++) {
-        y = GVT_STREAM_IDLE_SAMPLE_H == 1 ? 0 :
-            (int)((int64_t)sy * (height - 1) / (GVT_STREAM_IDLE_SAMPLE_H - 1));
-        for (sx = 0; sx < GVT_STREAM_IDLE_SAMPLE_W; sx++) {
-            const uint8_t *p;
-
-            x = GVT_STREAM_IDLE_SAMPLE_W == 1 ? 0 :
-                (int)((int64_t)sx * (width - 1) / (GVT_STREAM_IDLE_SAMPLE_W - 1));
-            p = data + (size_t)y * stride + (size_t)x * 4;
-            idx = sy * GVT_STREAM_IDLE_SAMPLE_W + sx;
-            sample[idx] = ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) | p[0];
-
-            if (gdpy->idle_sample_valid) {
-                uint32_t old = gdpy->idle_sample[idx];
-                int db = abs((int)(old & 0xff) - (int)(sample[idx] & 0xff));
-                int dg = abs((int)((old >> 8) & 0xff) -
-                             (int)((sample[idx] >> 8) & 0xff));
-                int dr = abs((int)((old >> 16) & 0xff) -
-                             (int)((sample[idx] >> 16) & 0xff));
-
-                if ((uint64_t)(db + dg + dr) > gdpy->idle_pixel_delta * 3) {
-                    changed++;
-                }
-            }
-        }
-    }
-
-    if (!gdpy->idle_sample_valid) {
-        memcpy(gdpy->idle_sample, sample, sizeof(sample));
-        gdpy->idle_sample_valid = true;
-        gdpy->last_content_change_ms = now_ms;
-        gdpy->last_probe_diff_ppm = 1000000;
-        return;
-    }
-
-    gdpy->last_probe_diff_ppm =
-        changed * 1000000ULL / GVT_STREAM_IDLE_SAMPLE_N;
-    if (gdpy->last_probe_diff_ppm > gdpy->idle_changed_ppm) {
-        if (gvt_stream_effective_capture_ms(gdpy, now_ms) > gdpy->capture_ms) {
-            gdpy->idle_wake_count++;
-        }
-        gdpy->last_content_change_ms = now_ms;
-        memcpy(gdpy->idle_sample, sample, sizeof(sample));
-    }
-}
-
-static void gvt_stream_probe_activity(GVTStreamDisplay *gdpy,
-                                      QemuDmaBuf *dmabuf,
-                                      int64_t now_ms)
-{
-#ifdef CONFIG_GBM
-    uint32_t width, height, texture;
-
-    if (!gdpy->idle_probe_ms || !dmabuf ||
-        (gdpy->last_probe_ms &&
-         now_ms - gdpy->last_probe_ms < gdpy->idle_probe_ms)) {
-        return;
-    }
-
-    gdpy->last_probe_ms = now_ms;
-    gdpy->idle_probe_count++;
-
-    egl_dmabuf_import_texture(dmabuf);
-    texture = qemu_dmabuf_get_texture(dmabuf);
-    if (!texture) {
-        gdpy->capture_fail_count++;
-        return;
-    }
-
-    width = qemu_dmabuf_get_width(dmabuf);
-    height = qemu_dmabuf_get_height(dmabuf);
-    if (!width || !height) {
-        return;
-    }
-
-    if (gdpy->guest_fb.texture != texture ||
-        gdpy->guest_fb.width != width || gdpy->guest_fb.height != height) {
-        egl_fb_destroy(&gdpy->guest_fb);
-        egl_fb_setup_for_tex(&gdpy->guest_fb, width, height, texture, false);
-        gdpy->guest_fb.dmabuf = dmabuf;
-    }
-
-    if (gdpy->capture_fb.width != width || gdpy->capture_fb.height != height) {
-        egl_fb_destroy(&gdpy->capture_fb);
-        egl_fb_setup_new_tex(&gdpy->capture_fb, width, height);
-    }
-
-    if (!gdpy->capture_surface ||
-        surface_width(gdpy->capture_surface) != width ||
-        surface_height(gdpy->capture_surface) != height) {
-        g_clear_pointer(&gdpy->capture_surface, qemu_free_displaysurface);
-        gdpy->capture_surface = qemu_create_displaysurface(width, height);
-    }
-
-    egl_fb_blit(&gdpy->capture_fb, &gdpy->guest_fb,
-                qemu_dmabuf_get_y0_top(dmabuf));
-    egl_fb_read(gdpy->capture_surface, &gdpy->capture_fb);
-    gdpy->last_capture_checksum =
-        gvt_stream_checksum_surface(gdpy->capture_surface);
-    gvt_stream_update_idle_sample(gdpy, gdpy->capture_surface, now_ms);
-#endif
-}
-
 static bool gvt_stream_write_ppm(GVTStreamDisplay *gdpy, const char *path)
 {
     DisplaySurface *surface = gdpy->capture_surface;
@@ -876,10 +732,11 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
             "! vaapih264enc rate-control=cbr bitrate=%d keyframe-period=%d "
             "max-bframes=0 refs=1 cabac=false aud=true "
             "! h264parse config-interval=1 "
-            "! rtph264pay pt=96 ssrc=2222 config-interval=1 mtu=1000 "
+            "! rtph264pay pt=96 ssrc=2222 config-interval=1 mtu=%u "
             "! rtpulpfecenc pt=122 percentage=%u percentage-important=%u multipacket=true "
             "! udpsink host=%s port=%u sync=false async=false",
             gdpy->encode_bitrate, gdpy->encode_keyint,
+            (unsigned)gdpy->rtp_mtu,
             (unsigned)gdpy->rtp_fec, (unsigned)gdpy->rtp_fec_important,
             gdpy->rtp_host, (unsigned)gdpy->rtp_port);
     } else if (gdpy->rtp_host && gdpy->rtp_port) {
@@ -891,9 +748,10 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
             "! vaapih264enc rate-control=cbr bitrate=%d keyframe-period=%d "
             "max-bframes=0 refs=1 cabac=false aud=true "
             "! h264parse config-interval=1 "
-            "! rtph264pay pt=96 ssrc=2222 config-interval=1 mtu=1000 "
+            "! rtph264pay pt=96 ssrc=2222 config-interval=1 mtu=%u "
             "! udpsink host=%s port=%u sync=false async=false",
             gdpy->encode_bitrate, gdpy->encode_keyint,
+            (unsigned)gdpy->rtp_mtu,
             gdpy->rtp_host, (unsigned)gdpy->rtp_port);
     } else {
         pipeline_desc = g_strdup_printf(
@@ -966,10 +824,11 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
     }
 
     if (gdpy->rtp_host && gdpy->rtp_port) {
-        error_report("gvt-stream: encode-start rtp=%s:%u size=%dx%d fps=%d "
+        error_report("gvt-stream: encode-start rtp=%s:%u mtu=%u size=%dx%d fps=%d "
                      "bitrate=%d keyint=%d fec=%u/%u path=%s dmabuf_caps=%d flip=%d",
-                     gdpy->rtp_host, (unsigned)gdpy->rtp_port, width, height,
-                     gdpy->encode_fps, gdpy->encode_bitrate, gdpy->encode_keyint,
+                     gdpy->rtp_host, (unsigned)gdpy->rtp_port,
+                     (unsigned)gdpy->rtp_mtu, width, height, gdpy->encode_fps,
+                     gdpy->encode_bitrate, gdpy->encode_keyint,
                      (unsigned)gdpy->rtp_fec, (unsigned)gdpy->rtp_fec_important,
                      gdpy->encode_dmabuf ? "dmabuf" : "cpu",
                      gdpy->encode_dmabuf_caps_feature, gdpy->encode_flip);
@@ -1240,7 +1099,7 @@ static void gvt_stream_capture_frame(GVTStreamDisplay *gdpy, int64_t now_ms)
     uint32_t width, height, texture;
     g_autofree char *path = NULL;
     bool had_texture;
-    uint64_t capture_ms;
+    uint64_t capture_ms = gvt_stream_effective_capture_ms(gdpy, now_ms);
 
     if ((!gdpy->capture_dir && !gdpy->encode_file &&
          !(gdpy->rtp_host && gdpy->rtp_port)) || !dmabuf) {
@@ -1249,9 +1108,6 @@ static void gvt_stream_capture_frame(GVTStreamDisplay *gdpy, int64_t now_ms)
     if (gdpy->capture_max && gdpy->capture_count >= gdpy->capture_max) {
         return;
     }
-
-    gvt_stream_probe_activity(gdpy, dmabuf, now_ms);
-    capture_ms = gvt_stream_effective_capture_ms(gdpy, now_ms);
     if (gdpy->last_capture_ms &&
         now_ms - gdpy->last_capture_ms < capture_ms) {
         return;
@@ -1522,8 +1378,6 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      " captures=%" PRIu64 " capture_failures=%" PRIu64
                      " encoded=%" PRIu64 " encode_failures=%" PRIu64
                      " dmabuf=%" PRIu64 " cpu=%" PRIu64 " capture_ms=%" PRIu64
-                     " probe_diff_ppm=%" PRIu64 " probes=%" PRIu64
-                     " idle_wakes=%" PRIu64
                      " last_checksum=0x%016" PRIx64,
                      qemu_console_get_index(dcl->con), gdpy->report_updates,
                      delta, fps, x, y, w, h, gdpy->scanout_count,
@@ -1533,8 +1387,6 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      gdpy->encode_count, gdpy->encode_fail_count,
                      gdpy->encode_dmabuf_count, gdpy->encode_cpu_count,
                      gvt_stream_effective_capture_ms(gdpy, now_ms),
-                     gdpy->last_probe_diff_ppm, gdpy->idle_probe_count,
-                     gdpy->idle_wake_count,
                      gdpy->last_capture_checksum);
 
         gdpy->last_report_ms = now_ms;
@@ -1625,15 +1477,6 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->idle_after_ms =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_AFTER_MS",
                                   1000, 0, 60000);
-        gdpy->idle_probe_ms =
-            gvt_stream_getenv_u64("GVT_STREAM_IDLE_PROBE_MS",
-                                  250, 0, 60000);
-        gdpy->idle_changed_ppm =
-            gvt_stream_getenv_u64("GVT_STREAM_IDLE_CHANGED_PPM",
-                                  3000, 0, 1000000);
-        gdpy->idle_pixel_delta =
-            gvt_stream_getenv_u64("GVT_STREAM_IDLE_PIXEL_DELTA",
-                                  8, 0, 255);
         gdpy->capture_max = gvt_stream_getenv_u64("GVT_STREAM_CAPTURE_MAX",
                                                   5, 0, 1000000);
         gdpy->encode_file = g_strdup(g_getenv("GVT_STREAM_ENCODE_FILE"));
@@ -1645,7 +1488,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->encode_fps = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_FPS",
                                                  30, 1, 120);
         gdpy->encode_bitrate = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_BITRATE",
-                                                     12000, 256, 100000);
+                                                     18000, 256, 100000);
         gdpy->encode_keyint = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_KEYINT",
                                                     30, 1, 300);
         gdpy->encode_flip = gvt_stream_getenv_bool("GVT_STREAM_ENCODE_FLIP", false);
@@ -1664,6 +1507,8 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         }
         gdpy->rtp_port = gvt_stream_getenv_u64("GVT_STREAM_RTP_PORT",
                                                port, 0, 65535);
+        gdpy->rtp_mtu = gvt_stream_getenv_u64("GVT_STREAM_RTP_MTU",
+                                              1400, 512, 1400);
         gdpy->rtp_fec = gvt_stream_getenv_u64("GVT_STREAM_RTP_FEC",
                                               0, 0, 100);
         gdpy->rtp_fec_important =
@@ -1696,22 +1541,19 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         error_report("gvt-stream: listener console=%d refresh_ms=%" PRIu64
                      " report_ms=%" PRIu64 " verbose=%d import_test=%d "
                      "capture_dir=%s capture_ms=%" PRIu64 " idle_capture_ms=%" PRIu64
-                     " idle_after_ms=%" PRIu64 " idle_probe_ms=%" PRIu64
-                     " idle_changed_ppm=%" PRIu64 " idle_pixel_delta=%" PRIu64
-                     " capture_max=%" PRIu64
+                     " idle_after_ms=%" PRIu64 " capture_max=%" PRIu64
                      " encode_file=%s encode_max=%" PRIu64 " encode_fps=%d "
-                     "path=%s flip=%d dmabuf_caps=%d rtp=%s:%u",
+                     "path=%s flip=%d dmabuf_caps=%d rtp=%s:%u rtp_mtu=%u",
                      qemu_console_get_index(con), gdpy->refresh_ms,
                      gdpy->report_ms, gdpy->verbose, gdpy->import_test,
                      gdpy->capture_dir ?: "", gdpy->capture_ms,
                      gdpy->idle_capture_ms, gdpy->idle_after_ms,
-                     gdpy->idle_probe_ms, gdpy->idle_changed_ppm,
-                     gdpy->idle_pixel_delta, gdpy->capture_max,
-                     gdpy->encode_file ?: "",
+                     gdpy->capture_max, gdpy->encode_file ?: "",
                      gdpy->encode_max, gdpy->encode_fps,
                      gdpy->encode_dmabuf ? "dmabuf" : "cpu",
                      gdpy->encode_flip, gdpy->encode_dmabuf_caps_feature,
-                     gdpy->rtp_host ?: "", (unsigned)gdpy->rtp_port);
+                     gdpy->rtp_host ?: "", (unsigned)gdpy->rtp_port,
+                     (unsigned)gdpy->rtp_mtu);
         register_displaychangelistener(&gdpy->dcl);
     }
 }
