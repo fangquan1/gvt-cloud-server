@@ -76,7 +76,12 @@ typedef struct GVTStreamDisplay {
     uint64_t import_fail_count;
     uint64_t capture_count;
     uint64_t capture_fail_count;
+    uint64_t cached_encode_count;
+    uint64_t cache_fail_count;
+    uint64_t cache_refresh_count;
+    uint64_t scanout_disable_count;
     uint64_t capture_ms;
+    uint64_t cache_refresh_ms;
     uint64_t idle_capture_ms;
     uint64_t idle_still_capture_ms;
     uint64_t idle_after_ms;
@@ -86,6 +91,7 @@ typedef struct GVTStreamDisplay {
     uint64_t capture_max;
     uint64_t last_capture_checksum;
     int64_t last_capture_ms;
+    int64_t cached_frame_ms;
     uint64_t startup_pump_ms;
     uint64_t startup_pump_interval_ms;
     int64_t startup_pump_until_ms;
@@ -93,9 +99,11 @@ typedef struct GVTStreamDisplay {
     int64_t last_activity_ms;
     int64_t last_content_change_ms;
     int64_t last_probe_ms;
+    int64_t last_wakeup_pulse_ms;
     uint64_t last_probe_diff_ppm;
     uint64_t idle_probe_count;
     uint64_t idle_wake_count;
+    uint64_t wakeup_pulse_count;
     bool idle_sample_valid;
     uint32_t idle_sample[GVT_STREAM_IDLE_SAMPLE_N];
     uint64_t encode_count;
@@ -118,6 +126,9 @@ typedef struct GVTStreamDisplay {
     GstElement *encode_pipeline;
     GstElement *encode_appsrc;
     GstElement *encode_encoder;
+    bool encode_pipeline_dmabuf;
+    int encode_pipeline_width;
+    int encode_pipeline_height;
     char *video_codec;
     char *encode_rate_control;
     char *capture_dir;
@@ -128,6 +139,7 @@ typedef struct GVTStreamDisplay {
     char *kms_connector;
     char *kms_device;
     DisplaySurface *capture_surface;
+    DisplaySurface *cached_surface;
     GstAllocator *dmabuf_allocator;
     drmModeModeInfo kms_mode;
     drmModeCrtc *kms_old_crtc;
@@ -183,6 +195,7 @@ typedef struct GVTStreamDisplay {
     bool encode_dmabuf;
     bool encode_dmabuf_caps_feature;
     bool encode_flip;
+    bool scanout_lost;
     egl_fb guest_fb;
     egl_fb capture_fb;
     egl_fb publish_fb[3];
@@ -245,6 +258,7 @@ static void gvt_stream_capture_frame(GVTStreamDisplay *gdpy, int64_t now_ms);
 static void gvt_stream_startup_pump_arm(GVTStreamDisplay *gdpy,
                                         int64_t now_ms);
 static void gvt_stream_startup_pump_stop(GVTStreamDisplay *gdpy);
+static bool gvt_stream_wake_if_suspended(void);
 
 static uint64_t gvt_stream_port_slot(uint64_t control_port)
 {
@@ -862,6 +876,7 @@ static void gvt_stream_input_process_line(GVTStreamInputClient *client,
     if (seq > 0) {
         gvt_stream_last_input_seq = seq;
     }
+    gvt_stream_wake_if_suspended();
     gvt_stream_input_process_dict(server, dict);
     qemu_input_event_sync();
     done_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
@@ -1040,7 +1055,7 @@ static void gvt_stream_control_apply_stop(GVTStreamDisplay *gdpy)
     error_report("gvt-stream-control: stream stopped");
 }
 
-static bool gvt_stream_control_wake_if_suspended(void)
+static bool gvt_stream_wake_if_suspended(void)
 {
     Error *err = NULL;
 
@@ -1059,7 +1074,7 @@ static bool gvt_stream_control_wake_if_suspended(void)
     return true;
 }
 
-static void gvt_stream_control_wakeup_input_pulse(void)
+static void gvt_stream_control_wakeup_input_pulse(const char *reason)
 {
     qemu_input_queue_abs(NULL, INPUT_AXIS_X,
                          INPUT_EVENT_ABS_MAX / 2,
@@ -1068,7 +1083,8 @@ static void gvt_stream_control_wakeup_input_pulse(void)
                          INPUT_EVENT_ABS_MAX / 2,
                          INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX);
     qemu_input_event_sync();
-    error_report("gvt-stream-control: wakeup input pulse sent");
+    error_report("gvt-stream-control: wakeup input pulse sent reason=%s",
+                 reason ?: "unknown");
 }
 
 static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
@@ -1110,9 +1126,12 @@ static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
     gdpy->last_encode_wall_ms = 0;
     gdpy->last_capture_ms = 0;
     gvt_stream_last_input_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-    was_suspended = gvt_stream_control_wake_if_suspended();
-    if (was_suspended) {
-        gvt_stream_control_wakeup_input_pulse();
+    was_suspended = gvt_stream_wake_if_suspended();
+    if (was_suspended || !gdpy->scanout) {
+        gvt_stream_control_wakeup_input_pulse(was_suspended ?
+                                             "suspended" : "no-scanout");
+        gdpy->last_wakeup_pulse_ms = gvt_stream_last_input_ms;
+        gdpy->wakeup_pulse_count++;
     }
     error_report("gvt-stream-control: stream target=%s:%u codec=%s",
                  gdpy->rtp_host, (unsigned)gdpy->rtp_port, gdpy->video_codec);
@@ -1124,15 +1143,21 @@ static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
         gvt_stream_capture_frame(gdpy, gvt_stream_last_input_ms);
     } else if (gdpy->scanout) {
         error_report("gvt-stream-control: delaying first capture until wakeup pump");
+    } else if (gdpy->cached_surface) {
+        error_report("gvt-stream-control: streaming cached frame while waiting "
+                     "for dmabuf scanout");
+        gvt_stream_capture_frame(gdpy, gvt_stream_last_input_ms);
     } else {
         warn_report("gvt-stream-control: stream armed but no dmabuf scanout yet");
     }
     gvt_stream_startup_pump_arm(gdpy, gvt_stream_last_input_ms);
-    if (was_suspended && gdpy->startup_pump_until_ms &&
-        gdpy->startup_pump_ms < 5000) {
-        gdpy->startup_pump_until_ms = gvt_stream_last_input_ms + 5000;
-        error_report("gvt-stream-control: startup pump extended after wakeup "
-                     "duration_ms=5000");
+    if ((was_suspended || !gdpy->scanout) && gdpy->startup_pump_until_ms &&
+        gdpy->startup_pump_ms < (was_suspended ? 15000 : 5000)) {
+        uint64_t extend_ms = was_suspended ? 15000 : 5000;
+        gdpy->startup_pump_until_ms = gvt_stream_last_input_ms + extend_ms;
+        error_report("gvt-stream-control: startup pump extended after %s "
+                     "duration_ms=%" PRIu64,
+                     was_suspended ? "wakeup" : "no-scanout", extend_ms);
     }
     return true;
 }
@@ -2613,7 +2638,18 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
         return false;
     }
     if (gdpy->encode_pipeline) {
-        return true;
+        if (gdpy->encode_pipeline_dmabuf == gdpy->encode_dmabuf &&
+            gdpy->encode_pipeline_width == width &&
+            gdpy->encode_pipeline_height == height) {
+            return true;
+        }
+        error_report("gvt-stream: encode-restart old_path=%s old_size=%dx%d "
+                     "new_path=%s new_size=%dx%d",
+                     gdpy->encode_pipeline_dmabuf ? "dmabuf" : "cpu",
+                     gdpy->encode_pipeline_width, gdpy->encode_pipeline_height,
+                     gdpy->encode_dmabuf ? "dmabuf" : "cpu",
+                     width, height);
+        gvt_stream_encoder_finish(gdpy);
     }
 
     gst_init(NULL, NULL);
@@ -2778,6 +2814,9 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
         return false;
     }
     gdpy->encode_current_bitrate = gdpy->encode_bitrate;
+    gdpy->encode_pipeline_dmabuf = gdpy->encode_dmabuf;
+    gdpy->encode_pipeline_width = width;
+    gdpy->encode_pipeline_height = height;
 
     if (gdpy->rtp_host && gdpy->rtp_port) {
         error_report("gvt-stream: encode-start codec=%s rtp=%s:%u size=%dx%d fps=%d "
@@ -2854,6 +2893,9 @@ static void gvt_stream_encoder_finish(GVTStreamDisplay *gdpy)
     gdpy->encode_encoder = NULL;
     gdpy->encode_appsrc = NULL;
     gdpy->encode_pipeline = NULL;
+    gdpy->encode_pipeline_dmabuf = false;
+    gdpy->encode_pipeline_width = 0;
+    gdpy->encode_pipeline_height = 0;
     error_report("gvt-stream: encode-finish frames=%" PRIu64 " target=%s",
                  gdpy->encode_count, gdpy->encode_file ?: gdpy->rtp_host);
 }
@@ -3057,15 +3099,18 @@ static void gvt_stream_encoder_push_dmabuf(GVTStreamDisplay *gdpy,
     }
 }
 
-static void gvt_stream_encoder_push(GVTStreamDisplay *gdpy, int64_t now_ms)
+static void gvt_stream_encoder_push_surface(GVTStreamDisplay *gdpy,
+                                            DisplaySurface *surface,
+                                            int64_t now_ms,
+                                            const char *source)
 {
-    DisplaySurface *surface = gdpy->capture_surface;
     GstBuffer *buf;
     GstMapInfo map;
     GstFlowReturn flow;
     uint8_t *src_data;
     int width, height, stride, y;
     size_t frame_size;
+    bool save_encode_dmabuf;
 
     if ((!gdpy->encode_file && !(gdpy->rtp_host && gdpy->rtp_port)) || !surface) {
         return;
@@ -3079,9 +3124,13 @@ static void gvt_stream_encoder_push(GVTStreamDisplay *gdpy, int64_t now_ms)
     stride = surface_stride(surface);
     frame_size = (size_t)width * height * 4;
 
+    save_encode_dmabuf = gdpy->encode_dmabuf;
+    gdpy->encode_dmabuf = false;
     if (!gvt_stream_encoder_start(gdpy, width, height)) {
+        gdpy->encode_dmabuf = save_encode_dmabuf;
         return;
     }
+    gdpy->encode_dmabuf = save_encode_dmabuf;
 
     buf = gst_buffer_new_allocate(NULL, frame_size, NULL);
     if (!buf) {
@@ -3122,8 +3171,9 @@ static void gvt_stream_encoder_push(GVTStreamDisplay *gdpy, int64_t now_ms)
     if (gdpy->verbose || gdpy->encode_max || gdpy->encode_count <= 5 ||
         gdpy->encode_count % 60 == 0) {
         error_report("gvt-stream: encode-push-ok #=%" PRIu64
-                     " target=%s checksum=0x%016" PRIx64,
+                     " source=%s target=%s checksum=0x%016" PRIx64,
                      gdpy->encode_count,
+                     source ?: "surface",
                      gdpy->encode_file ?: gdpy->rtp_host,
                      gdpy->last_capture_checksum);
     }
@@ -3131,6 +3181,106 @@ static void gvt_stream_encoder_push(GVTStreamDisplay *gdpy, int64_t now_ms)
     if (gdpy->encode_max && gdpy->encode_count == gdpy->encode_max) {
         gvt_stream_encoder_finish(gdpy);
     }
+}
+
+static void gvt_stream_encoder_push(GVTStreamDisplay *gdpy, int64_t now_ms)
+{
+    gvt_stream_encoder_push_surface(gdpy, gdpy->capture_surface, now_ms,
+                                    "capture");
+}
+
+static void gvt_stream_encoder_push_cached(GVTStreamDisplay *gdpy,
+                                           int64_t now_ms,
+                                           const char *reason)
+{
+    if (!gdpy->cached_surface) {
+        return;
+    }
+
+    gdpy->last_capture_checksum =
+        gvt_stream_checksum_surface(gdpy->cached_surface);
+    gvt_stream_encoder_push_surface(gdpy, gdpy->cached_surface, now_ms,
+                                    "cached");
+    gdpy->cached_encode_count++;
+    if (gdpy->verbose || gdpy->cached_encode_count <= 5 ||
+        gdpy->cached_encode_count % 60 == 0) {
+        error_report("gvt-stream: cached-frame-push #=%" PRIu64
+                     " reason=%s age_ms=%" PRId64
+                     " checksum=0x%016" PRIx64,
+                     gdpy->cached_encode_count, reason ?: "unknown",
+                     gdpy->cached_frame_ms ?
+                     now_ms - gdpy->cached_frame_ms : -1,
+                     gdpy->last_capture_checksum);
+    }
+}
+
+static bool gvt_stream_cache_scanout_frame(GVTStreamDisplay *gdpy,
+                                           QemuDmaBuf *dmabuf,
+                                           int64_t now_ms,
+                                           const char *reason)
+{
+#ifdef CONFIG_GBM
+    uint32_t width, height, texture;
+    bool had_texture;
+
+    if (!dmabuf) {
+        return false;
+    }
+
+    had_texture = qemu_dmabuf_get_texture(dmabuf) != 0;
+    egl_dmabuf_import_texture(dmabuf);
+    texture = qemu_dmabuf_get_texture(dmabuf);
+    if (!texture) {
+        gdpy->cache_fail_count++;
+        warn_report("gvt-stream: cache-frame-import-failed failures=%" PRIu64
+                    " reason=%s",
+                    gdpy->cache_fail_count, reason ?: "unknown");
+        return false;
+    }
+    if (!had_texture) {
+        gdpy->import_count++;
+    }
+
+    width = qemu_dmabuf_get_width(dmabuf);
+    height = qemu_dmabuf_get_height(dmabuf);
+    if (!width || !height) {
+        gdpy->cache_fail_count++;
+        return false;
+    }
+
+    if (gdpy->guest_fb.texture != texture ||
+        gdpy->guest_fb.width != width || gdpy->guest_fb.height != height) {
+        egl_fb_destroy(&gdpy->guest_fb);
+        egl_fb_setup_for_tex(&gdpy->guest_fb, width, height, texture, false);
+        gdpy->guest_fb.dmabuf = dmabuf;
+    }
+
+    if (gdpy->capture_fb.width != width || gdpy->capture_fb.height != height) {
+        egl_fb_destroy(&gdpy->capture_fb);
+        egl_fb_setup_new_tex(&gdpy->capture_fb, width, height);
+    }
+
+    if (!gdpy->cached_surface ||
+        surface_width(gdpy->cached_surface) != width ||
+        surface_height(gdpy->cached_surface) != height) {
+        g_clear_pointer(&gdpy->cached_surface, qemu_free_displaysurface);
+        gdpy->cached_surface = qemu_create_displaysurface(width, height);
+    }
+
+    egl_fb_blit(&gdpy->capture_fb, &gdpy->guest_fb,
+                qemu_dmabuf_get_y0_top(dmabuf));
+    egl_fb_read(gdpy->cached_surface, &gdpy->capture_fb);
+    gdpy->last_capture_checksum =
+        gvt_stream_checksum_surface(gdpy->cached_surface);
+    gdpy->cached_frame_ms = now_ms;
+    error_report("gvt-stream: cached-frame-save reason=%s size=%ux%u "
+                 "checksum=0x%016" PRIx64,
+                 reason ?: "unknown", width, height,
+                 gdpy->last_capture_checksum);
+    return true;
+#else
+    return false;
+#endif
 }
 
 static void gvt_stream_capture_frame(GVTStreamDisplay *gdpy, int64_t now_ms)
@@ -3142,22 +3292,40 @@ static void gvt_stream_capture_frame(GVTStreamDisplay *gdpy, int64_t now_ms)
     bool had_texture;
     uint64_t capture_ms;
 
-    if ((!gdpy->capture_dir && !gdpy->encode_file &&
-         !(gdpy->rtp_host && gdpy->rtp_port)) || !dmabuf) {
+    if (!gdpy->capture_dir && !gdpy->encode_file &&
+        !(gdpy->rtp_host && gdpy->rtp_port)) {
         return;
     }
     if (gdpy->capture_max && gdpy->capture_count >= gdpy->capture_max) {
         return;
     }
 
-    gvt_stream_probe_activity(gdpy, dmabuf, now_ms);
     capture_ms = gvt_stream_effective_capture_ms(gdpy, now_ms);
     if (gdpy->last_capture_ms &&
         now_ms - gdpy->last_capture_ms < capture_ms) {
         return;
     }
 
+    if (!dmabuf) {
+        if (gdpy->cached_surface) {
+            gdpy->capture_count++;
+            gdpy->last_capture_ms = now_ms;
+            gvt_stream_encoder_push_cached(gdpy, now_ms, "no-scanout");
+        }
+        return;
+    }
+
+    gvt_stream_probe_activity(gdpy, dmabuf, now_ms);
+
     if (gdpy->encode_dmabuf && !gdpy->capture_dir) {
+        if (gdpy->cache_refresh_ms &&
+            (!gdpy->cached_frame_ms ||
+             now_ms - gdpy->cached_frame_ms >= gdpy->cache_refresh_ms)) {
+            if (gvt_stream_cache_scanout_frame(gdpy, dmabuf, now_ms,
+                                               "live-refresh")) {
+                gdpy->cache_refresh_count++;
+            }
+        }
         if (gvt_stream_last_input_seq > 0 &&
             gvt_stream_last_input_capture_seq != gvt_stream_last_input_seq &&
             gvt_stream_last_input_ms > 0 &&
@@ -3279,6 +3447,13 @@ static void gvt_stream_startup_pump_cb(void *opaque)
     }
 
     if (now_ms <= gdpy->startup_pump_until_ms) {
+        if (!gdpy->scanout &&
+            (!gdpy->last_wakeup_pulse_ms ||
+             now_ms - gdpy->last_wakeup_pulse_ms >= 1000)) {
+            gvt_stream_control_wakeup_input_pulse("no-scanout-pump");
+            gdpy->last_wakeup_pulse_ms = now_ms;
+            gdpy->wakeup_pulse_count++;
+        }
         gvt_stream_capture_frame(gdpy, now_ms);
     }
 
@@ -3298,6 +3473,7 @@ static void gvt_stream_startup_pump_arm(GVTStreamDisplay *gdpy,
                                         int64_t now_ms)
 {
     uint64_t interval_ms;
+    int64_t until_ms;
 
     if (!gdpy || !gdpy->startup_pump_ms || !gdpy->startup_pump_timer) {
         return;
@@ -3307,11 +3483,15 @@ static void gvt_stream_startup_pump_arm(GVTStreamDisplay *gdpy,
     if (!interval_ms) {
         interval_ms = 17;
     }
-    gdpy->startup_pump_until_ms = now_ms + gdpy->startup_pump_ms;
+    until_ms = now_ms + gdpy->startup_pump_ms;
+    if (gdpy->startup_pump_until_ms > until_ms) {
+        until_ms = gdpy->startup_pump_until_ms;
+    }
+    gdpy->startup_pump_until_ms = until_ms;
     timer_mod(gdpy->startup_pump_timer, now_ms + interval_ms);
-    error_report("gvt-stream-control: startup pump armed duration_ms=%" PRIu64
+    error_report("gvt-stream-control: startup pump armed duration_ms=%" PRId64
                  " interval_ms=%" PRIu64,
-                 gdpy->startup_pump_ms, interval_ms);
+                 gdpy->startup_pump_until_ms - now_ms, interval_ms);
 }
 
 static void gvt_stream_refresh(DisplayChangeListener *dcl)
@@ -3353,8 +3533,16 @@ static void gvt_stream_gfx_switch(DisplayChangeListener *dcl,
 static void gvt_stream_scanout_disable(DisplayChangeListener *dcl)
 {
     GVTStreamDisplay *gdpy = container_of(dcl, GVTStreamDisplay, dcl);
+    int64_t now_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    bool active = gdpy->encode_file || (gdpy->rtp_host && gdpy->rtp_port);
 
+    gdpy->scanout_disable_count++;
+    if (gdpy->scanout) {
+        gvt_stream_cache_scanout_frame(gdpy, gdpy->scanout, now_ms,
+                                       "scanout-disable");
+    }
     gdpy->scanout = NULL;
+    gdpy->scanout_lost = true;
     gvt_stream_kms_close(gdpy);
     egl_fb_destroy(&gdpy->guest_fb);
     egl_fb_destroy(&gdpy->capture_fb);
@@ -3362,8 +3550,14 @@ static void gvt_stream_scanout_disable(DisplayChangeListener *dcl)
         egl_fb_destroy(&gdpy->publish_fb[i]);
     }
     g_clear_pointer(&gdpy->capture_surface, qemu_free_displaysurface);
-    error_report("gvt-stream: scanout-disable console=%d",
-                 qemu_console_get_index(dcl->con));
+    if (active && gdpy->cached_surface) {
+        gvt_stream_encoder_push_cached(gdpy, now_ms, "scanout-disable");
+        gvt_stream_startup_pump_arm(gdpy, now_ms);
+    }
+    error_report("gvt-stream: scanout-disable #%" PRIu64 " console=%d "
+                 "cached=%d active=%d",
+                 gdpy->scanout_disable_count, qemu_console_get_index(dcl->con),
+                 gdpy->cached_surface != NULL, active);
 }
 
 static void gvt_stream_scanout_texture(DisplayChangeListener *dcl,
@@ -3394,9 +3588,16 @@ static void gvt_stream_scanout_dmabuf(DisplayChangeListener *dcl,
     int64_t now_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     gdpy->scanout = dmabuf;
+    gdpy->scanout_lost = false;
     gdpy->scanout_count++;
     if (gdpy->verbose || gdpy->scanout_count <= 8) {
         gvt_stream_log_dmabuf(gdpy, "scanout-dmabuf", dmabuf);
+    }
+    if (!gdpy->cached_surface && dmabuf) {
+        if (gvt_stream_cache_scanout_frame(gdpy, dmabuf, now_ms,
+                                           "first-scanout")) {
+            gdpy->cache_refresh_count++;
+        }
     }
 
     if ((gdpy->import_test || gdpy->capture_dir) && dmabuf) {
@@ -3473,6 +3674,10 @@ static void gvt_stream_release_dmabuf(DisplayChangeListener *dcl,
     if (gdpy->kms_cursor_dmabuf == dmabuf) {
         gvt_stream_kms_clear_cursor(gdpy);
     }
+    if (gdpy->scanout == dmabuf) {
+        gdpy->scanout = NULL;
+        gdpy->scanout_lost = true;
+    }
     if (gdpy->kms_fb_dmabuf == dmabuf) {
         gdpy->kms_fb_dmabuf = NULL;
     }
@@ -3527,11 +3732,14 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      "scanouts=%" PRIu64 " cursor=%" PRIu64 " releases=%" PRIu64
                      " imports=%" PRIu64 " import_failures=%" PRIu64
                      " captures=%" PRIu64 " capture_failures=%" PRIu64
+                     " cached=%" PRIu64 " cache_refresh=%" PRIu64
+                     " cache_failures=%" PRIu64
+                     " scanout_disable=%" PRIu64 " scanout_lost=%d "
                      " encoded=%" PRIu64 " encode_failures=%" PRIu64
                      " dmabuf=%" PRIu64 " cpu=%" PRIu64
                      " bitrate=%d target_bitrate=%d capture_ms=%" PRIu64
                      " probe_diff_ppm=%" PRIu64 " probes=%" PRIu64
-                     " idle_wakes=%" PRIu64
+                     " idle_wakes=%" PRIu64 " wake_pulses=%" PRIu64
                      " input_msgs=%" PRIu64 " input_events=%" PRIu64
                      " input_parse_errors=%" PRIu64 " last_input_age_ms=%" PRId64
                      " kms=%" PRIu64 "/%" PRIu64
@@ -3545,13 +3753,16 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      gdpy->cursor_count, gdpy->release_count,
                      gdpy->import_count, gdpy->import_fail_count,
                      gdpy->capture_count, gdpy->capture_fail_count,
+                     gdpy->cached_encode_count, gdpy->cache_refresh_count,
+                     gdpy->cache_fail_count,
+                     gdpy->scanout_disable_count, gdpy->scanout_lost,
                      gdpy->encode_count, gdpy->encode_fail_count,
                      gdpy->encode_dmabuf_count, gdpy->encode_cpu_count,
                      gdpy->encode_current_bitrate,
                      gvt_stream_effective_bitrate(gdpy, now_ms),
                      gvt_stream_effective_capture_ms(gdpy, now_ms),
                       gdpy->last_probe_diff_ppm, gdpy->idle_probe_count,
-                      gdpy->idle_wake_count,
+                      gdpy->idle_wake_count, gdpy->wakeup_pulse_count,
                       gvt_stream_input_server ?
                       gvt_stream_input_server->messages : 0,
                       gvt_stream_input_server ?
@@ -3663,6 +3874,9 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         }
         gdpy->capture_ms = gvt_stream_getenv_u64("GVT_STREAM_CAPTURE_MS",
                                                  17, 16, 60000);
+        gdpy->cache_refresh_ms =
+            gvt_stream_getenv_u64("GVT_STREAM_CACHE_REFRESH_MS",
+                                  1000, 0, 60000);
         gdpy->idle_capture_ms =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_CAPTURE_MS",
                                   gdpy->capture_ms, 16, 60000);
@@ -3822,6 +4036,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         error_report("gvt-stream: listener console=%d refresh_ms=%" PRIu64
                      " report_ms=%" PRIu64 " verbose=%d import_test=%d "
                      "capture_dir=%s capture_ms=%" PRIu64 " idle_capture_ms=%" PRIu64
+                     " cache_refresh_ms=%" PRIu64
                      " idle_still_capture_ms=%" PRIu64
                      " idle_after_ms=%" PRIu64 " idle_probe_ms=%" PRIu64
                      " idle_changed_ppm=%" PRIu64 " idle_pixel_delta=%" PRIu64
@@ -3834,7 +4049,8 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      qemu_console_get_index(con), gdpy->refresh_ms,
                      gdpy->report_ms, gdpy->verbose, gdpy->import_test,
                      gdpy->capture_dir ?: "", gdpy->capture_ms,
-                     gdpy->idle_capture_ms, gdpy->idle_still_capture_ms,
+                     gdpy->idle_capture_ms, gdpy->cache_refresh_ms,
+                     gdpy->idle_still_capture_ms,
                      gdpy->idle_after_ms,
                      gdpy->idle_probe_ms, gdpy->idle_changed_ppm,
                      gdpy->idle_pixel_delta, gdpy->capture_max,
