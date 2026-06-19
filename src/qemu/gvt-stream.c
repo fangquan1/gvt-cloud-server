@@ -98,6 +98,7 @@ typedef struct GVTStreamDisplay {
     uint64_t rtp_port;
     uint64_t rtp_fec;
     uint64_t rtp_fec_important;
+    int rtp_mtu;
     uint64_t encode_dmabuf_count;
     uint64_t encode_cpu_count;
     GstElement *encode_pipeline;
@@ -1482,12 +1483,13 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
                 "! %s name=enc rate-control=%s bitrate=%d keyframe-period=%d "
                 "%s"
                 "! %s config-interval=1 "
-                "! %s pt=96 ssrc=2222 config-interval=1 mtu=1000 "
+                "! %s pt=96 ssrc=2222 config-interval=1 mtu=%d "
                 "! rtpulpfecenc pt=122 percentage=%u percentage-important=%u multipacket=true "
                 "! udpsink host=%s port=%u sync=false async=false",
                 encoder, gdpy->encode_rate_control, gdpy->encode_bitrate,
                 gdpy->encode_keyint,
                 encoder_opts, parser, payloader,
+                gdpy->rtp_mtu,
                 (unsigned)gdpy->rtp_fec, (unsigned)gdpy->rtp_fec_important,
                 gdpy->rtp_host, (unsigned)gdpy->rtp_port);
         } else if (gdpy->rtp_host && gdpy->rtp_port) {
@@ -1498,11 +1500,12 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
                 "! %s name=enc rate-control=%s bitrate=%d keyframe-period=%d "
                 "%s"
                 "! %s config-interval=1 "
-                "! %s pt=96 ssrc=2222 config-interval=1 mtu=1000 "
+                "! %s pt=96 ssrc=2222 config-interval=1 mtu=%d "
                 "! udpsink host=%s port=%u sync=false async=false",
                 encoder, gdpy->encode_rate_control, gdpy->encode_bitrate,
                 gdpy->encode_keyint,
                 encoder_opts, parser, payloader,
+                gdpy->rtp_mtu,
                 gdpy->rtp_host, (unsigned)gdpy->rtp_port);
         } else {
             pipeline_desc = g_strdup_printf(
@@ -1528,12 +1531,13 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
             "! %s name=enc rate-control=%s bitrate=%d keyframe-period=%d "
             "%s"
             "! %s config-interval=1 "
-            "! %s pt=96 ssrc=2222 config-interval=1 mtu=1000 "
+            "! %s pt=96 ssrc=2222 config-interval=1 mtu=%d "
             "! rtpulpfecenc pt=122 percentage=%u percentage-important=%u multipacket=true "
             "! udpsink host=%s port=%u sync=false async=false",
             encoder, gdpy->encode_rate_control, gdpy->encode_bitrate,
             gdpy->encode_keyint,
             encoder_opts, parser, payloader,
+            gdpy->rtp_mtu,
             (unsigned)gdpy->rtp_fec, (unsigned)gdpy->rtp_fec_important,
             gdpy->rtp_host, (unsigned)gdpy->rtp_port);
     } else if (gdpy->rtp_host && gdpy->rtp_port) {
@@ -1545,11 +1549,12 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
             "! %s name=enc rate-control=%s bitrate=%d keyframe-period=%d "
             "%s"
             "! %s config-interval=1 "
-            "! %s pt=96 ssrc=2222 config-interval=1 mtu=1000 "
+            "! %s pt=96 ssrc=2222 config-interval=1 mtu=%d "
             "! udpsink host=%s port=%u sync=false async=false",
             encoder, gdpy->encode_rate_control, gdpy->encode_bitrate,
             gdpy->encode_keyint,
             encoder_opts, parser, payloader,
+            gdpy->rtp_mtu,
             gdpy->rtp_host, (unsigned)gdpy->rtp_port);
     } else {
         pipeline_desc = g_strdup_printf(
@@ -1639,13 +1644,14 @@ static bool gvt_stream_encoder_start(GVTStreamDisplay *gdpy,
     if (gdpy->rtp_host && gdpy->rtp_port) {
         error_report("gvt-stream: encode-start codec=%s rtp=%s:%u size=%dx%d fps=%d "
                      "rate_control=%s bitrate=%d idle_bitrate=%d still_bitrate=%d "
-                     "keyint=%d "
+                     "keyint=%d mtu=%d "
                      "fec=%u/%u path=%s dmabuf_caps=%d flip=%d",
                      gdpy->video_codec,
                      gdpy->rtp_host, (unsigned)gdpy->rtp_port, width, height,
                      gdpy->encode_fps, gdpy->encode_rate_control,
                      gdpy->encode_bitrate, gdpy->encode_idle_bitrate,
                      gdpy->encode_still_bitrate, gdpy->encode_keyint,
+                     gdpy->rtp_mtu,
                      (unsigned)gdpy->rtp_fec, (unsigned)gdpy->rtp_fec_important,
                      gdpy->encode_dmabuf ? "dmabuf" : "cpu",
                      gdpy->encode_dmabuf_caps_feature, gdpy->encode_flip);
@@ -2766,9 +2772,11 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                                                gdpy->rtp_host ? port : 0,
                                                0, 65535);
         gdpy->rtp_fec = gvt_stream_getenv_u64("GVT_STREAM_RTP_FEC",
-                                              0, 0, 100);
+                                               0, 0, 100);
         gdpy->rtp_fec_important =
             gvt_stream_getenv_u64("GVT_STREAM_RTP_FEC_IMPORTANT", 0, 0, 100);
+        gdpy->rtp_mtu = gvt_stream_getenv_u64("GVT_STREAM_RTP_MTU",
+                                              1000, 576, 1400);
         if (gdpy->rtp_host && !gdpy->rtp_port) {
             warn_report("gvt-stream: disabling RTP, missing port for host %s",
                         gdpy->rtp_host);
@@ -2805,7 +2813,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      " startup_pump_interval_ms=%" PRIu64
                      " encode_file=%s encode_max=%" PRIu64 " encode_fps=%d codec=%s "
                      "rate_control=%s bitrate=%d idle_bitrate=%d still_bitrate=%d "
-                     "path=%s flip=%d dmabuf_caps=%d rtp=%s:%u",
+                     "path=%s flip=%d dmabuf_caps=%d rtp=%s:%u mtu=%d",
                      qemu_console_get_index(con), gdpy->refresh_ms,
                      gdpy->report_ms, gdpy->verbose, gdpy->import_test,
                      gdpy->capture_dir ?: "", gdpy->capture_ms,
@@ -2821,7 +2829,8 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      gdpy->encode_idle_bitrate, gdpy->encode_still_bitrate,
                      gdpy->encode_dmabuf ? "dmabuf" : "cpu",
                      gdpy->encode_flip, gdpy->encode_dmabuf_caps_feature,
-                     gdpy->rtp_host ?: "", (unsigned)gdpy->rtp_port);
+                     gdpy->rtp_host ?: "", (unsigned)gdpy->rtp_port,
+                     gdpy->rtp_mtu);
         register_displaychangelistener(&gdpy->dcl);
     }
 }
