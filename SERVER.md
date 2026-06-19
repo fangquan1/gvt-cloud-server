@@ -46,6 +46,39 @@ export LIBVA_DRIVER_NAME=iHD
 export LIBVA_DRIVERS_PATH=/usr/lib64/dri:/usr/local/lib64/dri
 ```
 
+## Version Compatibility
+
+The current working host uses GStreamer `1.22.5` and loads the VAAPI plugin from
+`/usr/local/lib64/gstreamer-1.0/libgstvaapi.so`. Keep the GStreamer headers,
+libraries, and plugins on one matching stack. In practice this means:
+
+- Build QEMU against the same GStreamer version that will be used at runtime.
+- Keep `LD_LIBRARY_PATH`, `GST_PLUGIN_PATH`, and `GST_PLUGIN_SYSTEM_PATH_1_0`
+  pointed at the same prefix, currently `/usr/local/lib64`.
+- Do not mix distro GStreamer libraries with a manually installed
+  `libgstvaapi.so`, or the reverse.
+- Rebuild QEMU after changing the GStreamer, VAAPI, libdrm, or Mesa stack.
+
+Version or prefix mismatches usually show up as `gst-inspect-1.0 vaapih264enc`
+not finding the element, plugin load warnings, `encode-pipeline-create-failed`,
+or a runtime pipeline that silently falls back away from the expected VAAPI
+path.
+
+Quick check on the server:
+
+```bash
+export LD_LIBRARY_PATH=/usr/local/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export GST_PLUGIN_PATH=/usr/local/lib64/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}
+export GST_PLUGIN_SYSTEM_PATH_1_0=/usr/local/lib64/gstreamer-1.0:/usr/lib64/gstreamer-1.0
+export LIBVA_DRIVER_NAME=iHD
+export LIBVA_DRIVERS_PATH=/usr/lib64/dri:/usr/local/lib64/dri
+
+gst-inspect-1.0 --version
+gst-inspect-1.0 vaapih264enc
+gst-inspect-1.0 vaapih265enc
+vainfo --display drm --device /dev/dri/renderD128
+```
+
 ## Apply And Build
 
 From a clean QEMU source tree:
