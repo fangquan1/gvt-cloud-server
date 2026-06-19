@@ -1099,10 +1099,17 @@ static void gvt_stream_control_send_status(GVTStreamControlClient *client,
     GVTStreamDisplay *gdpy = gvt_stream_control_display;
     char message[512];
     int64_t start_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    uint64_t video_udp = 0;
     ssize_t ret;
 
     if (!client) {
         return;
+    }
+
+    if (gdpy && gdpy->rtp_port) {
+        video_udp = gdpy->rtp_port;
+    } else if (gvt_stream_control_server) {
+        video_udp = gvt_stream_control_server->listen_port;
     }
 
     if (ok) {
@@ -1111,7 +1118,7 @@ static void gvt_stream_control_send_status(GVTStreamControlClient *client,
                  ",\"spice_tcp\":%" PRIu64
                  ",\"input_tcp\":%" PRIu64
                  ",\"codec\":\"%s\"}\n",
-                 gdpy ? (uint64_t)gdpy->rtp_port : 0,
+                 video_udp,
                  gvt_stream_spice_port,
                  gvt_stream_input_port,
                  (gdpy && gdpy->video_codec) ? gdpy->video_codec : "h264");
@@ -1198,6 +1205,9 @@ static void gvt_stream_control_process_line(GVTStreamControlClient *client,
             gvt_stream_control_active_client = client;
             gvt_stream_control_server->messages++;
         }
+    } else if (!g_strcmp0(type, "status")) {
+        gvt_stream_control_send_status(client, true, NULL);
+        gvt_stream_control_server->messages++;
     } else if (!g_strcmp0(type, "stop")) {
         if (gvt_stream_control_active_client == client) {
             gvt_stream_control_active_client = NULL;
