@@ -36,6 +36,7 @@ QEMU_LOG=${QEMU_LOG:-$QEMU_DIR/$VM_ID.log}
 PID_FILE=${PID_FILE:-$QEMU_DIR/$VM_ID.pid}
 MONITOR_SOCK=${MONITOR_SOCK:-$QEMU_DIR/$VM_ID-monitor.sock}
 QMP_SOCK=${QMP_SOCK:-$QEMU_DIR/$VM_ID-qmp.sock}
+QGA_SOCK=${QGA_SOCK:-$QEMU_DIR/$VM_ID-qga.sock}
 VFIO_DEVICE=${VFIO_DEVICE:-/sys/bus/pci/devices/0000:00:02.0/$VGPU_UUID}
 CAPTURE_MS=${CAPTURE_MS:-17}
 IDLE_CAPTURE_MS=${IDLE_CAPTURE_MS:-17}
@@ -60,7 +61,7 @@ ip tuntap add dev "$TAP_IF" mode tap
 ip link set "$TAP_IF" master "$BR_IF"
 ip link set "$TAP_IF" up
 
-rm -f "$MONITOR_SOCK" "$QMP_SOCK" "$QEMU_LOG" "$PID_FILE"
+rm -f "$MONITOR_SOCK" "$QMP_SOCK" "$QGA_SOCK" "$QEMU_LOG" "$PID_FILE"
 
 export LD_LIBRARY_PATH=/usr/local/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export GST_PLUGIN_PATH=/usr/local/lib64/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}
@@ -98,6 +99,9 @@ exec "$QEMU_BIN" \
   -netdev "tap,id=net0,ifname=$TAP_IF,script=no,downscript=no" \
   -device "e1000e,netdev=net0,mac=$MAC" \
   -k en-us -device qemu-xhci -device usb-tablet -device usb-kbd \
+  -device virtio-serial-pci \
+  -chardev "socket,path=$QGA_SOCK,server=on,wait=off,id=qga0" \
+  -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
   -audiodev spice,id=audio0 \
   -device ich9-intel-hda \
   -device hda-duplex,audiodev=audio0 \

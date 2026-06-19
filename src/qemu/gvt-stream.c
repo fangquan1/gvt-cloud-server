@@ -12,6 +12,7 @@
 #include "qemu/module.h"
 #include "qemu/sockets.h"
 #include "qemu/timer.h"
+#include "system/runstate.h"
 #include "qapi/error.h"
 #include "qapi/util.h"
 #include "qobject/qdict.h"
@@ -1039,12 +1040,44 @@ static void gvt_stream_control_apply_stop(GVTStreamDisplay *gdpy)
     error_report("gvt-stream-control: stream stopped");
 }
 
+static bool gvt_stream_control_wake_if_suspended(void)
+{
+    Error *err = NULL;
+
+    if (!runstate_check(RUN_STATE_SUSPENDED)) {
+        return false;
+    }
+
+    qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, &err);
+    if (err) {
+        warn_report("gvt-stream-control: wakeup request failed: %s",
+                    error_get_pretty(err));
+        error_free(err);
+    } else {
+        error_report("gvt-stream-control: wakeup requested from suspended VM");
+    }
+    return true;
+}
+
+static void gvt_stream_control_wakeup_input_pulse(void)
+{
+    qemu_input_queue_abs(NULL, INPUT_AXIS_X,
+                         INPUT_EVENT_ABS_MAX / 2,
+                         INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX);
+    qemu_input_queue_abs(NULL, INPUT_AXIS_Y,
+                         INPUT_EVENT_ABS_MAX / 2,
+                         INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX);
+    qemu_input_event_sync();
+    error_report("gvt-stream-control: wakeup input pulse sent");
+}
+
 static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
                                            const char *host,
                                            uint64_t port,
                                            const char *codec)
 {
     bool changed;
+    bool was_suspended;
 
     if (!gdpy || !host || !*host || !port) {
         warn_report("gvt-stream-control: ignoring invalid START target");
@@ -1077,18 +1110,30 @@ static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
     gdpy->last_encode_wall_ms = 0;
     gdpy->last_capture_ms = 0;
     gvt_stream_last_input_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    was_suspended = gvt_stream_control_wake_if_suspended();
+    if (was_suspended) {
+        gvt_stream_control_wakeup_input_pulse();
+    }
     error_report("gvt-stream-control: stream target=%s:%u codec=%s",
                  gdpy->rtp_host, (unsigned)gdpy->rtp_port, gdpy->video_codec);
     error_report("gvt-stream-control: session ports video_udp=%u spice_tcp=%" PRIu64
                  " input_tcp=%" PRIu64,
                  (unsigned)gdpy->rtp_port, gvt_stream_spice_port,
                  gvt_stream_input_port);
-    if (gdpy->scanout) {
+    if (gdpy->scanout && !was_suspended) {
         gvt_stream_capture_frame(gdpy, gvt_stream_last_input_ms);
+    } else if (gdpy->scanout) {
+        error_report("gvt-stream-control: delaying first capture until wakeup pump");
     } else {
         warn_report("gvt-stream-control: stream armed but no dmabuf scanout yet");
     }
     gvt_stream_startup_pump_arm(gdpy, gvt_stream_last_input_ms);
+    if (was_suspended && gdpy->startup_pump_until_ms &&
+        gdpy->startup_pump_ms < 5000) {
+        gdpy->startup_pump_until_ms = gvt_stream_last_input_ms + 5000;
+        error_report("gvt-stream-control: startup pump extended after wakeup "
+                     "duration_ms=5000");
+    }
     return true;
 }
 

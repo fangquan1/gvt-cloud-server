@@ -691,6 +691,7 @@ start_one() {
     local log="$DIR/$name.log"
     local qmp="$DIR/$name-qmp.sock"
     local mon="$DIR/$name-monitor.sock"
+    local qga="$DIR/$name-qga.sock"
     local pidfile="$DIR/$name.pid"
     local upper
     local mode_var
@@ -709,7 +710,7 @@ start_one() {
     fi
 
     setup_tap "$tap"
-    rm -f "$qmp" "$mon"
+    rm -f "$qmp" "$mon" "$qga"
     meta_mode="${VM_MODE:-}"
     meta_vcpus="${VM_VCPUS:-}"
     meta_memory_mib="${VM_MEMORY_MIB:-}"
@@ -870,6 +871,9 @@ start_one() {
             -netdev tap,id=net0,ifname="$tap",script=no,downscript=no \
             -device e1000e,netdev=net0,mac="$mac" \
             -k en-us -device qemu-xhci -device usb-tablet -device usb-kbd \
+            -device virtio-serial-pci \
+            -chardev socket,path="$qga",server=on,wait=off,id=qga0 \
+            -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
             -audiodev spice,id=audio0 \
             -device ich9-intel-hda \
             -device hda-duplex,audiodev=audio0 \

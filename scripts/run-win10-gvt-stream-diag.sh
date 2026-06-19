@@ -4,6 +4,7 @@ set -euo pipefail
 QEMU_LOG=/root/qemu_cmd/win10-gvt-stream-diag.log
 MONITOR_SOCK=/root/qemu_cmd/win10-gvt-stream-monitor.sock
 QMP_SOCK=/root/qemu_cmd/win10-gvt-stream-qmp.sock
+QGA_SOCK=/root/qemu_cmd/win10-gvt-stream-qga.sock
 SPICE_AUDIO_PORT=${GVT_STREAM_SPICE_AUDIO_PORT:-${GVT_STREAM_SPICE_PORT:-5900}}
 VIDEO_CODEC=${GVT_STREAM_VIDEO_CODEC:-h264}
 RTP_HOST=${GVT_STREAM_RTP_HOST:-}
@@ -28,7 +29,7 @@ ip tuntap del dev "$TAP_IF" mode tap 2>/dev/null || true
 ip tuntap add dev "$TAP_IF" mode tap
 ip link set "$TAP_IF" master "$BR_IF"
 ip link set "$TAP_IF" up
-rm -f "$MONITOR_SOCK" "$QMP_SOCK"
+rm -f "$MONITOR_SOCK" "$QMP_SOCK" "$QGA_SOCK"
 
 export LD_LIBRARY_PATH=/usr/local/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 export GST_PLUGIN_PATH=/usr/local/lib64/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}
@@ -64,6 +65,9 @@ nohup "$QEMU_BIN" \
   -netdev tap,id=net0,ifname="$TAP_IF",script=no,downscript=no \
   -device e1000e,netdev=net0,mac=52:54:00:10:00:88 \
   -k en-us -device qemu-xhci -device usb-tablet -device usb-kbd \
+  -device virtio-serial-pci \
+  -chardev socket,path="$QGA_SOCK",server=on,wait=off,id=qga0 \
+  -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
   "${EXTRA_INPUT_ARGS[@]}" \
   -audiodev spice,id=audio0 \
   -device ich9-intel-hda \
@@ -79,4 +83,4 @@ if ! kill -0 "$(cat /root/qemu_cmd/win10-gvt-stream-diag.pid)" 2>/dev/null; then
   exit 1
 fi
 
-echo "QEMU gvt-stream diag started, pid=$(cat /root/qemu_cmd/win10-gvt-stream-diag.pid), disk=$VM_DISK, log=$QEMU_LOG, qmp=$QMP_SOCK, spice_audio=0.0.0.0:$SPICE_AUDIO_PORT"
+echo "QEMU gvt-stream diag started, pid=$(cat /root/qemu_cmd/win10-gvt-stream-diag.pid), disk=$VM_DISK, log=$QEMU_LOG, qmp=$QMP_SOCK, qga=$QGA_SOCK, spice_audio=0.0.0.0:$SPICE_AUDIO_PORT"
