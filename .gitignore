@@ -15,3 +15,5 @@ dist/
 secrets/
 runtime/
 qemu-build/
+*.rej
+*.orig
