@@ -85,6 +85,10 @@ typedef struct GVTStreamDisplay {
     uint64_t capture_max;
     uint64_t last_capture_checksum;
     int64_t last_capture_ms;
+    uint64_t startup_pump_ms;
+    uint64_t startup_pump_interval_ms;
+    int64_t startup_pump_until_ms;
+    QEMUTimer *startup_pump_timer;
     int64_t last_activity_ms;
     int64_t last_content_change_ms;
     int64_t last_probe_ms;
@@ -237,6 +241,9 @@ static uint64_t gvt_stream_input_port;
 
 static void gvt_stream_encoder_finish(GVTStreamDisplay *gdpy);
 static void gvt_stream_capture_frame(GVTStreamDisplay *gdpy, int64_t now_ms);
+static void gvt_stream_startup_pump_arm(GVTStreamDisplay *gdpy,
+                                        int64_t now_ms);
+static void gvt_stream_startup_pump_stop(GVTStreamDisplay *gdpy);
 
 static uint64_t gvt_stream_port_slot(uint64_t control_port)
 {
@@ -1021,6 +1028,7 @@ static void gvt_stream_control_apply_stop(GVTStreamDisplay *gdpy)
     if (!gdpy) {
         return;
     }
+    gvt_stream_startup_pump_stop(gdpy);
     if (gdpy->encode_pipeline) {
         gvt_stream_encoder_finish(gdpy);
     }
@@ -1080,6 +1088,7 @@ static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
     } else {
         warn_report("gvt-stream-control: stream armed but no dmabuf scanout yet");
     }
+    gvt_stream_startup_pump_arm(gdpy, gvt_stream_last_input_ms);
     return true;
 }
 
@@ -3186,6 +3195,70 @@ static void gvt_stream_capture_frame(GVTStreamDisplay *gdpy, int64_t now_ms)
 #endif
 }
 
+static void gvt_stream_startup_pump_stop(GVTStreamDisplay *gdpy)
+{
+    if (!gdpy) {
+        return;
+    }
+    gdpy->startup_pump_until_ms = 0;
+    if (gdpy->startup_pump_timer) {
+        timer_del(gdpy->startup_pump_timer);
+    }
+}
+
+static void gvt_stream_startup_pump_cb(void *opaque)
+{
+    GVTStreamDisplay *gdpy = opaque;
+    int64_t now_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+    uint64_t interval_ms;
+    bool active;
+
+    if (!gdpy || !gdpy->startup_pump_until_ms) {
+        return;
+    }
+
+    active = gdpy->encode_file || (gdpy->rtp_host && gdpy->rtp_port);
+    if (!active) {
+        gvt_stream_startup_pump_stop(gdpy);
+        return;
+    }
+
+    if (now_ms <= gdpy->startup_pump_until_ms) {
+        gvt_stream_capture_frame(gdpy, now_ms);
+    }
+
+    if (now_ms >= gdpy->startup_pump_until_ms) {
+        gdpy->startup_pump_until_ms = 0;
+        return;
+    }
+
+    interval_ms = gdpy->startup_pump_interval_ms ?: gdpy->capture_ms;
+    if (!interval_ms) {
+        interval_ms = 17;
+    }
+    timer_mod(gdpy->startup_pump_timer, now_ms + interval_ms);
+}
+
+static void gvt_stream_startup_pump_arm(GVTStreamDisplay *gdpy,
+                                        int64_t now_ms)
+{
+    uint64_t interval_ms;
+
+    if (!gdpy || !gdpy->startup_pump_ms || !gdpy->startup_pump_timer) {
+        return;
+    }
+
+    interval_ms = gdpy->startup_pump_interval_ms ?: gdpy->capture_ms;
+    if (!interval_ms) {
+        interval_ms = 17;
+    }
+    gdpy->startup_pump_until_ms = now_ms + gdpy->startup_pump_ms;
+    timer_mod(gdpy->startup_pump_timer, now_ms + interval_ms);
+    error_report("gvt-stream-control: startup pump armed duration_ms=%" PRIu64
+                 " interval_ms=%" PRIu64,
+                 gdpy->startup_pump_ms, interval_ms);
+}
+
 static void gvt_stream_refresh(DisplayChangeListener *dcl)
 {
     graphic_hw_update(dcl->con);
@@ -3554,7 +3627,18 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_PIXEL_DELTA",
                                   8, 0, 255);
         gdpy->capture_max = gvt_stream_getenv_u64("GVT_STREAM_CAPTURE_MAX",
-                                                  0, 0, 1000000);
+                                                   0, 0, 1000000);
+        gdpy->startup_pump_ms =
+            gvt_stream_getenv_u64("GVT_STREAM_STARTUP_PUMP_MS",
+                                  2500, 0, 10000);
+        gdpy->startup_pump_interval_ms =
+            gvt_stream_getenv_u64("GVT_STREAM_STARTUP_PUMP_INTERVAL_MS",
+                                  gdpy->capture_ms, 1, 1000);
+        if (gdpy->startup_pump_ms) {
+            gdpy->startup_pump_timer =
+                timer_new_ms(QEMU_CLOCK_REALTIME, gvt_stream_startup_pump_cb,
+                             gdpy);
+        }
         gdpy->encode_file = g_strdup(g_getenv("GVT_STREAM_ENCODE_FILE"));
         if (gdpy->encode_file && !*gdpy->encode_file) {
             g_clear_pointer(&gdpy->encode_file, g_free);
@@ -3686,7 +3770,8 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      " idle_still_capture_ms=%" PRIu64
                      " idle_after_ms=%" PRIu64 " idle_probe_ms=%" PRIu64
                      " idle_changed_ppm=%" PRIu64 " idle_pixel_delta=%" PRIu64
-                     " capture_max=%" PRIu64
+                     " capture_max=%" PRIu64 " startup_pump_ms=%" PRIu64
+                     " startup_pump_interval_ms=%" PRIu64
                      " encode_file=%s encode_max=%" PRIu64 " encode_fps=%d codec=%s "
                      "rate_control=%s bitrate=%d idle_bitrate=%d still_bitrate=%d "
                      "path=%s flip=%d dmabuf_caps=%d rtp=%s:%u kms=%s "
@@ -3698,6 +3783,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      gdpy->idle_after_ms,
                      gdpy->idle_probe_ms, gdpy->idle_changed_ppm,
                      gdpy->idle_pixel_delta, gdpy->capture_max,
+                     gdpy->startup_pump_ms, gdpy->startup_pump_interval_ms,
                      gdpy->encode_file ?: "",
                      gdpy->encode_max, gdpy->encode_fps, gdpy->video_codec,
                      gdpy->encode_rate_control, gdpy->encode_bitrate,
