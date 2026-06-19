@@ -213,7 +213,7 @@ export GVT_STREAM_CACHE_REFRESH_MS=1000
   -device virtio-serial-pci \
   -chardev socket,path=/root/qemu_cmd/win10-gvt-stream-qga.sock,server=on,wait=off,id=qga0 \
   -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
-  -audiodev spice,id=audio0 \
+  -audiodev spice,id=audio0,timer-period=5000,out.frequency=48000,out.channels=2,out.format=s16,out.buffer-length=100000 \
   -device ich9-intel-hda \
   -device hda-duplex,audiodev=audio0 \
   -monitor unix:/root/qemu_cmd/win10-gvt-stream-monitor.sock,server,nowait \
