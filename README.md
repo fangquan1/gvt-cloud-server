@@ -2,16 +2,18 @@
 
 Minimal server-side patch set for the GVT-g cloud desktop project.
 
-This repository now keeps only the host/QEMU display path:
+This repository keeps the host/QEMU display path plus a minimal systemd runner:
 
 - `src/qemu/gvt-stream.c`: the current QEMU `gvt-stream` display backend.
 - `patches/qemu-gvt-stream.patch`: the patch to apply to a QEMU source tree.
 - `SERVER.md`: build, run, verification, and troubleshooting notes.
+- `deploy/systemd/gvt-qemu@.service`: optional systemd unit for QEMU VMs.
+- `scripts/gvt-qm` and `scripts/gvt-qm-run`: small helpers for the unit.
 
 The old kernel shadow framebuffer route, direct-stream RTP streamer, physical
-output daemon, Python control plane, multi-VM helper scripts, and Windows batch
-launchers were removed from `current`. They remain available in Git history if
-they are ever needed for reference.
+output daemon, Python web/API control plane, multi-VM helper scripts, and
+Windows batch launchers were removed from `current`. They remain available in
+Git history if they are ever needed for reference.
 
 Current baseline:
 

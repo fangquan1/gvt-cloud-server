@@ -3,8 +3,9 @@
 ## Purpose
 
 This repository provides the server-side QEMU patch for the current GVT-g cloud
-desktop route. It does not ship a VM manager, web control plane, kernel
-shadow framebuffer code, or physical display switcher.
+desktop route plus a minimal systemd runner for launching the patched QEMU. It
+does not ship the old web control plane, kernel shadow framebuffer code, or
+physical display switcher.
 
 The core implementation is `src/qemu/gvt-stream.c`. The distributable QEMU patch
 is `patches/qemu-gvt-stream.patch`.
@@ -44,6 +45,87 @@ export GST_PLUGIN_PATH=/usr/local/lib64/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PL
 export GST_PLUGIN_SYSTEM_PATH_1_0=/usr/local/lib64/gstreamer-1.0:/usr/lib64/gstreamer-1.0
 export LIBVA_DRIVER_NAME=iHD
 export LIBVA_DRIVERS_PATH=/usr/lib64/dri:/usr/local/lib64/dri
+```
+
+## Install GStreamer VAAPI Plugins
+
+First install the distro packages that provide the core GStreamer, VAAPI, DRM,
+GBM, EGL, and SPICE development files:
+
+```bash
+dnf install -y git gcc gcc-c++ make ninja-build meson pkgconf-pkg-config \
+  glib2-devel pixman-devel zlib-devel libdrm libdrm-devel \
+  mesa-libgbm mesa-libgbm-devel mesa-libEGL mesa-libEGL-devel \
+  libepoxy-devel spice-server-devel \
+  gstreamer1 gstreamer1-devel \
+  gstreamer1-plugins-base gstreamer1-plugins-base-devel \
+  gstreamer1-plugins-good gstreamer1-plugins-bad-free \
+  gstreamer1-plugins-bad-free-devel gstreamer1-libav \
+  libva libva-devel libva-utils intel-gmmlib
+```
+
+On the current openEuler test host the distro core GStreamer package is
+`1.22.5`, but the distro `gstreamer1-plugins-bad-free` package is older. The
+working deployment therefore installs the matching `gst-plugins-bad` codec
+parser library and `gstreamer-vaapi` plugin from source into `/usr/local`.
+
+Use the same GStreamer minor version as `gst-inspect-1.0 --version` reports:
+
+```bash
+export GST_VER=1.22.5
+export DEPS=/usr/local/src/project/deps
+mkdir -p "$DEPS"
+cd "$DEPS"
+
+wget -c "https://gstreamer.freedesktop.org/src/gst-plugins-bad/gst-plugins-bad-${GST_VER}.tar.xz"
+tar -xf "gst-plugins-bad-${GST_VER}.tar.xz"
+cd "gst-plugins-bad-${GST_VER}"
+meson setup build-codecparsers \
+  -Dauto_features=disabled \
+  -Dvideoparsers=enabled \
+  -Dexamples=disabled \
+  -Dtests=disabled \
+  -Dintrospection=disabled \
+  -Dnls=disabled \
+  -Dprefix=/usr/local \
+  -Dlibdir=lib64
+ninja -C build-codecparsers
+ninja -C build-codecparsers install
+ldconfig
+
+cd "$DEPS"
+wget -c "https://gstreamer.freedesktop.org/src/gstreamer-vaapi/gstreamer-vaapi-${GST_VER}.tar.xz"
+tar -xf "gstreamer-vaapi-${GST_VER}.tar.xz"
+cd "gstreamer-vaapi-${GST_VER}"
+meson setup build-vaapi \
+  -Dexamples=disabled \
+  -Dtests=disabled \
+  -Dprefix=/usr/local \
+  -Dlibdir=lib64
+ninja -C build-vaapi
+ninja -C build-vaapi install
+ldconfig
+```
+
+Verify that the VAAPI encoders are found from `/usr/local`:
+
+```bash
+export LD_LIBRARY_PATH=/usr/local/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export GST_PLUGIN_PATH=/usr/local/lib64/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}
+export GST_PLUGIN_SYSTEM_PATH_1_0=/usr/local/lib64/gstreamer-1.0:/usr/lib64/gstreamer-1.0
+export LIBVA_DRIVER_NAME=iHD
+export LIBVA_DRIVERS_PATH=/usr/lib64/dri:/usr/local/lib64/dri
+
+gst-inspect-1.0 vaapih264enc | grep -E 'Long-name|Filename|Version'
+gst-inspect-1.0 vaapih265enc | grep -E 'Long-name|Filename|Version'
+vainfo --display drm --device /dev/dri/renderD128
+```
+
+Expected current plugin identity:
+
+```text
+Filename                 /usr/local/lib64/gstreamer-1.0/libgstvaapi.so
+Version                  1.22.5
 ```
 
 ## Version Compatibility
@@ -143,6 +225,64 @@ Default ports are derived from the display/control port:
 - video/control TCP or RTP target: `5004`
 - SPICE audio/session TCP: `5900`
 - native input TCP: `5905`
+
+## Optional Systemd Runner
+
+The repository also ships a minimal systemd wrapper for running a QEMU VM as a
+service. This is the small `gvt-qm` path from the earlier deployment work, not
+the removed Python web/API control plane.
+
+Install it on the host:
+
+```bash
+cd /usr/local/src/project/gvt-cloud-server
+bash deploy/install-gvt-qm.sh
+```
+
+Installed files:
+
+- `/usr/local/bin/gvt-qm`: operator command wrapper.
+- `/usr/local/sbin/gvt-qm-run`: launches QEMU from one VM config.
+- `/etc/systemd/system/gvt-qemu@.service`: systemd template unit.
+- `/etc/gvt-qm/win10.conf`: example VM config copied on first install.
+
+Edit `/etc/gvt-qm/win10.conf` before starting. At minimum set:
+
+```bash
+QEMU_BIN=/usr/local/src/project/qemu/build/qemu-system-x86_64
+VM_DISK=/root/qemu_cmd/win10-gvtg.qcow2
+VGPU_UUID=e582c6f5-e5cd-4a8e-9443-55a013e9f193
+RENDER_NODE=/dev/dri/renderD128
+TAP_IF=tap-win10
+BR_IF=br0
+VIDEO_PORT=5004
+SPICE_PORT=5900
+INPUT_PORT=5905
+CODEC=h264
+```
+
+Then manage the VM:
+
+```bash
+gvt-qm start win10
+gvt-qm status win10
+gvt-qm logs win10
+gvt-qm stop win10
+```
+
+Equivalent raw systemd commands:
+
+```bash
+systemctl start gvt-qemu@win10.service
+systemctl status gvt-qemu@win10.service
+journalctl -u gvt-qemu@win10.service -f
+systemctl stop gvt-qemu@win10.service
+```
+
+The runner configures the same runtime environment used above:
+`LD_LIBRARY_PATH`, `GST_PLUGIN_PATH`, `GST_PLUGIN_SYSTEM_PATH_1_0`,
+`LIBVA_DRIVER_NAME=iHD`, `LIBVA_DRIVERS_PATH`, `GVT_STREAM_*` ports, capture
+timing, and FEC disabled by default.
 
 ## Encoding And Control Behavior
 

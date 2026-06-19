@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VM_ID=${1:-}
+if [[ ! "$VM_ID" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+  echo "usage: gvt-qm-run <vm-id>" >&2
+  exit 2
+fi
+
+CONFIG_DIR=${GVT_QM_CONFIG_DIR:-/etc/gvt-qm}
+CONFIG_FILE=${GVT_QM_CONFIG_FILE:-$CONFIG_DIR/$VM_ID.conf}
+
+if [ ! -r "$CONFIG_FILE" ]; then
+  echo "missing VM config: $CONFIG_FILE" >&2
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+. "$CONFIG_FILE"
+
+QEMU_BIN=${QEMU_BIN:-/usr/local/src/project/qemu/build/qemu-system-x86_64}
+QEMU_DIR=${QEMU_DIR:-/root/qemu_cmd}
+VM_DISK=${VM_DISK:?VM_DISK is required}
+VGPU_UUID=${VGPU_UUID:?VGPU_UUID is required}
+RENDER_NODE=${RENDER_NODE:-/dev/dri/renderD128}
+TAP_IF=${TAP_IF:-tap-$VM_ID}
+BR_IF=${BR_IF:-br0}
+MAC=${MAC:-52:54:00:10:00:88}
+VCPUS=${VCPUS:-4}
+MEMORY_MIB=${MEMORY_MIB:-4096}
+CODEC=${CODEC:-h264}
+VIDEO_PORT=${VIDEO_PORT:-5004}
+SPICE_PORT=${SPICE_PORT:-5900}
+INPUT_PORT=${INPUT_PORT:-5905}
+QEMU_LOG=${QEMU_LOG:-$QEMU_DIR/$VM_ID.log}
+PID_FILE=${PID_FILE:-$QEMU_DIR/$VM_ID.pid}
+MONITOR_SOCK=${MONITOR_SOCK:-$QEMU_DIR/$VM_ID-monitor.sock}
+QMP_SOCK=${QMP_SOCK:-$QEMU_DIR/$VM_ID-qmp.sock}
+QGA_SOCK=${QGA_SOCK:-$QEMU_DIR/$VM_ID-qga.sock}
+VFIO_DEVICE=${VFIO_DEVICE:-/sys/bus/pci/devices/0000:00:02.0/$VGPU_UUID}
+CAPTURE_MS=${CAPTURE_MS:-17}
+IDLE_CAPTURE_MS=${IDLE_CAPTURE_MS:-17}
+IDLE_AFTER_MS=${IDLE_AFTER_MS:-0}
+IDLE_PROBE_MS=${IDLE_PROBE_MS:-0}
+ENCODE_FPS=${ENCODE_FPS:-59}
+ENCODE_BITRATE=${ENCODE_BITRATE:-18000}
+ENCODE_KEYINT=${ENCODE_KEYINT:-59}
+EXTRA_QEMU_ARGS=${EXTRA_QEMU_ARGS:-}
+
+mkdir -p "$QEMU_DIR"
+
+cleanup_tap() {
+  ip link set "$TAP_IF" down 2>/dev/null || true
+  ip link set "$TAP_IF" nomaster 2>/dev/null || true
+  ip link delete "$TAP_IF" 2>/dev/null || true
+  ip tuntap del dev "$TAP_IF" mode tap 2>/dev/null || true
+}
+
+cleanup_tap
+ip tuntap add dev "$TAP_IF" mode tap
+ip link set "$TAP_IF" master "$BR_IF"
+ip link set "$TAP_IF" up
+
+rm -f "$MONITOR_SOCK" "$QMP_SOCK" "$QGA_SOCK" "$QEMU_LOG" "$PID_FILE"
+
+export LD_LIBRARY_PATH=/usr/local/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export GST_PLUGIN_PATH=/usr/local/lib64/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}
+export GST_PLUGIN_SYSTEM_PATH_1_0=/usr/local/lib64/gstreamer-1.0:/usr/lib64/gstreamer-1.0
+export LIBVA_DRIVER_NAME=${LIBVA_DRIVER_NAME:-iHD}
+export LIBVA_DRIVERS_PATH=${LIBVA_DRIVERS_PATH:-/usr/lib64/dri:/usr/local/lib64/dri}
+export GVT_STREAM_INPUT_HOST=${GVT_STREAM_INPUT_HOST:-0.0.0.0}
+export GVT_STREAM_INPUT_PORT=$INPUT_PORT
+export GVT_STREAM_SPICE_PORT=$SPICE_PORT
+export GVT_STREAM_SPICE_AUDIO_PORT=$SPICE_PORT
+export GVT_STREAM_VIDEO_CODEC=$CODEC
+export GVT_STREAM_REFRESH_MS=${GVT_STREAM_REFRESH_MS:-17}
+export GVT_STREAM_CAPTURE_MS=$CAPTURE_MS
+export GVT_STREAM_IDLE_CAPTURE_MS=$IDLE_CAPTURE_MS
+export GVT_STREAM_IDLE_AFTER_MS=$IDLE_AFTER_MS
+export GVT_STREAM_IDLE_PROBE_MS=$IDLE_PROBE_MS
+export GVT_STREAM_ENCODE_FPS=$ENCODE_FPS
+export GVT_STREAM_ENCODE_BITRATE=$ENCODE_BITRATE
+export GVT_STREAM_ENCODE_KEYINT=$ENCODE_KEYINT
+export GVT_STREAM_RTP_FEC=${GVT_STREAM_RTP_FEC:-0}
+export GVT_STREAM_RTP_FEC_IMPORTANT=${GVT_STREAM_RTP_FEC_IMPORTANT:-0}
+export GVT_STREAM_IMPORT_TEST=${GVT_STREAM_IMPORT_TEST:-0}
+
+echo $$ > "$PID_FILE"
+exec >>"$QEMU_LOG" 2>&1
+echo "gvt-qm-run: vm=$VM_ID qemu=$QEMU_BIN disk=$VM_DISK tap=$TAP_IF bridge=$BR_IF"
+echo "gvt-qm-run: ports control/video=$VIDEO_PORT spice=$SPICE_PORT input=$INPUT_PORT codec=$CODEC"
+
+exec "$QEMU_BIN" \
+  --nodefaults -enable-kvm -cpu host -m "$MEMORY_MIB" -smp "$VCPUS" -boot order=c \
+  -display "gvt-stream,rendernode=$RENDER_NODE,codec=$CODEC,port=$VIDEO_PORT" \
+  -spice "port=$SPICE_PORT,addr=0.0.0.0,disable-ticketing=on,agent-mouse=off,playback-compression=off,streaming-video=off,image-compression=off,disable-copy-paste=on,disable-agent-file-xfer=on,display=none" \
+  -device "vfio-pci-nohotplug,sysfsdev=$VFIO_DEVICE,display=on,x-igd-opregion=on,ramfb=on" \
+  -hda "$VM_DISK" \
+  -netdev "tap,id=net0,ifname=$TAP_IF,script=no,downscript=no" \
+  -device "e1000e,netdev=net0,mac=$MAC" \
+  -k en-us -device qemu-xhci -device usb-tablet -device usb-kbd \
+  -device virtio-serial-pci \
+  -chardev "socket,path=$QGA_SOCK,server=on,wait=off,id=qga0" \
+  -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
+  -audiodev spice,id=audio0 \
+  -device ich9-intel-hda \
+  -device hda-duplex,audiodev=audio0 \
+  -monitor "unix:$MONITOR_SOCK,server,nowait" \
+  -qmp "unix:$QMP_SOCK,server,nowait" \
+  $EXTRA_QEMU_ARGS
