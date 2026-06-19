@@ -3640,7 +3640,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                                                    0, 0, 1000000);
         gdpy->startup_pump_ms =
             gvt_stream_getenv_u64("GVT_STREAM_STARTUP_PUMP_MS",
-                                  0, 0, 10000);
+                                  1500, 0, 10000);
         gdpy->startup_pump_interval_ms =
             gvt_stream_getenv_u64("GVT_STREAM_STARTUP_PUMP_INTERVAL_MS",
                                   gdpy->capture_ms, 1, 1000);
