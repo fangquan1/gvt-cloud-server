@@ -2776,7 +2776,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->rtp_fec_important =
             gvt_stream_getenv_u64("GVT_STREAM_RTP_FEC_IMPORTANT", 0, 0, 100);
         gdpy->rtp_mtu = gvt_stream_getenv_u64("GVT_STREAM_RTP_MTU",
-                                              1000, 576, 1400);
+                                              1400, 576, 1400);
         if (gdpy->rtp_host && !gdpy->rtp_port) {
             warn_report("gvt-stream: disabling RTP, missing port for host %s",
                         gdpy->rtp_host);
