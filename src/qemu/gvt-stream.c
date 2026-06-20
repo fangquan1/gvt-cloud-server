@@ -131,10 +131,13 @@ typedef struct GVTStreamDisplay {
     bool external_cpu_cache;
     char *external_socket;
     int external_fd;
+    bool external_start_sent;
     uint64_t external_seq;
     uint64_t external_frame_count;
     uint64_t external_no_scanout_count;
     uint64_t external_send_fail_count;
+    uint64_t external_connect_fail_count;
+    int64_t external_last_connect_warn_ms;
     uint64_t external_stats_count;
     uint64_t external_encoded;
     uint64_t external_encode_failures;
@@ -343,7 +346,12 @@ static int gvt_stream_set_nonblock(int fd)
 
 static void gvt_stream_external_close(GVTStreamDisplay *gdpy)
 {
-    if (!gdpy || gdpy->external_fd < 0) {
+    if (!gdpy) {
+        return;
+    }
+
+    gdpy->external_start_sent = false;
+    if (gdpy->external_fd < 0) {
         return;
     }
 
@@ -359,6 +367,22 @@ static bool gvt_stream_external_message_valid(const GVTStreamIpcMessage *msg,
         msg->magic == GVT_STREAM_IPC_MAGIC &&
         msg->version == GVT_STREAM_IPC_VERSION &&
         msg->size == sizeof(*msg);
+}
+
+static void gvt_stream_external_warn_connect_failed(GVTStreamDisplay *gdpy,
+                                                    const char *detail)
+{
+    int64_t now_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+    gdpy->external_connect_fail_count++;
+    if (gdpy->verbose || gdpy->external_connect_fail_count <= 5 ||
+        now_ms - gdpy->external_last_connect_warn_ms >= 1000) {
+        warn_report("gvt-stream-external: connect %s failed: %s "
+                    "failures=%" PRIu64,
+                    gdpy->external_socket, detail,
+                    gdpy->external_connect_fail_count);
+        gdpy->external_last_connect_warn_ms = now_ms;
+    }
 }
 
 static void gvt_stream_external_read(void *opaque)
@@ -442,14 +466,15 @@ static bool gvt_stream_external_connect(GVTStreamDisplay *gdpy)
         ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
     } while (ret < 0 && errno == EINTR);
     if (ret < 0) {
-        warn_report("gvt-stream-external: connect %s failed: %s",
-                    gdpy->external_socket, strerror(errno));
+        gvt_stream_external_warn_connect_failed(gdpy, strerror(errno));
         close(fd);
         return false;
     }
 
     gvt_stream_set_nonblock(fd);
     gdpy->external_fd = fd;
+    gdpy->external_connect_fail_count = 0;
+    gdpy->external_last_connect_warn_ms = 0;
     qemu_set_fd_handler(fd, gvt_stream_external_read, NULL, gdpy);
     error_report("gvt-stream-external: connected socket=%s fd=%d",
                  gdpy->external_socket, fd);
@@ -557,6 +582,7 @@ static bool gvt_stream_external_send_start(GVTStreamDisplay *gdpy,
                                     now_ms);
     ok = gvt_stream_external_send_message(gdpy, &msg, -1);
     if (ok) {
+        gdpy->external_start_sent = true;
         error_report("gvt-stream-external: start target=%s:%u codec=%s "
                      "fps=%u bitrate=%u keyint=%u mtu=%u fec=%u/%u "
                      "socket=%s",
@@ -573,7 +599,11 @@ static void gvt_stream_external_send_stop(GVTStreamDisplay *gdpy,
 {
     GVTStreamIpcMessage msg;
 
-    if (!gdpy || !gdpy->external || gdpy->external_fd < 0) {
+    if (!gdpy || !gdpy->external) {
+        return;
+    }
+    gdpy->external_start_sent = false;
+    if (gdpy->external_fd < 0) {
         return;
     }
 
@@ -587,6 +617,10 @@ static void gvt_stream_external_send_no_scanout(GVTStreamDisplay *gdpy,
     GVTStreamIpcMessage msg;
 
     if (!gdpy || !gdpy->external || !gdpy->rtp_host || !gdpy->rtp_port) {
+        return;
+    }
+    if (!gdpy->external_start_sent &&
+        !gvt_stream_external_send_start(gdpy, now_ms)) {
         return;
     }
 
@@ -638,6 +672,11 @@ static bool gvt_stream_external_send_frame(GVTStreamDisplay *gdpy,
                      qemu_dmabuf_get_width(dmabuf),
                      qemu_dmabuf_get_height(dmabuf),
                      qemu_dmabuf_get_fourcc(dmabuf));
+        return false;
+    }
+
+    if (!gdpy->external_start_sent &&
+        !gvt_stream_external_send_start(gdpy, now_ms)) {
         return false;
     }
 

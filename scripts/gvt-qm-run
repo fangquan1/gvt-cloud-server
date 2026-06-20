@@ -75,14 +75,41 @@ cleanup_streamd() {
   rm -f "$GVT_STREAMD_PID_FILE" "$GVT_STREAMD_SOCKET"
 }
 
+process_alive() {
+  local pid=$1
+  local stat
+
+  if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  stat=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+  [ -n "$stat" ] && [[ "$stat" != Z* ]]
+}
+
+streamd_alive() {
+  local pid
+
+  if [ ! -s "$GVT_STREAMD_PID_FILE" ]; then
+    return 1
+  fi
+  pid=$(cat "$GVT_STREAMD_PID_FILE" 2>/dev/null || true)
+  process_alive "$pid"
+}
+
 start_streamd() {
+  local truncate_log=${1:-1}
+
   if [ ! -x "$GVT_STREAMD_BIN" ]; then
     echo "missing executable gvt-streamd: $GVT_STREAMD_BIN" >&2
     exit 1
   fi
 
   cleanup_streamd
-  rm -f "$GVT_STREAMD_LOG"
+  if [ "$truncate_log" = "1" ]; then
+    rm -f "$GVT_STREAMD_LOG"
+  else
+    echo "gvt-qm-run: restarting streamd at $(date -Is)" >>"$GVT_STREAMD_LOG"
+  fi
   "$GVT_STREAMD_BIN" --socket "$GVT_STREAMD_SOCKET" >>"$GVT_STREAMD_LOG" 2>&1 &
   echo $! > "$GVT_STREAMD_PID_FILE"
 
@@ -174,9 +201,16 @@ if [[ "$GVT_STREAM_EXTERNAL" == "1" || "$GVT_STREAM_EXTERNAL" == "true" || "$GVT
   }
   trap terminate_external INT TERM EXIT
 
-  start_streamd
+  start_streamd 1
   "$QEMU_BIN" "${qemu_args[@]}" &
   qemu_pid=$!
+  while process_alive "$qemu_pid"; do
+    if ! streamd_alive; then
+      echo "gvt-qm-run: streamd exited; restarting socket=$GVT_STREAMD_SOCKET"
+      start_streamd 0
+    fi
+    sleep 1
+  done
   wait "$qemu_pid"
   qemu_status=$?
   qemu_pid=0
