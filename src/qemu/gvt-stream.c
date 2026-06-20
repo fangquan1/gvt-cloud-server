@@ -2661,7 +2661,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                                                  17, 16, 60000);
         gdpy->cache_refresh_ms =
             gvt_stream_getenv_u64("GVT_STREAM_CACHE_REFRESH_MS",
-                                  1000, 0, 60000);
+                                  0, 0, 60000);
         gdpy->idle_capture_ms =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_CAPTURE_MS",
                                   gdpy->capture_ms, 16, 60000);
