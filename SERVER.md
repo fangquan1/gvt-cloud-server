@@ -192,7 +192,7 @@ The patch adds:
 - `ui/meson.build` registration for the `gvt-stream` UI module
 - `qapi/ui.json` support for `-display gvt-stream,...`
 
-Build the experimental external encoder helper:
+Build the standalone encoder helper:
 
 ```bash
 cd /usr/local/src/project/gvt-cloud-server
@@ -209,15 +209,11 @@ export GVT_STREAM_REPORT_MS=1000
 export GVT_STREAM_VERBOSE=0
 export GVT_STREAM_SPICE_PORT=5900
 export GVT_STREAM_STARTUP_PUMP_MS=1500
-export GVT_STREAM_CACHE_REFRESH_MS=1000
-# Optional current-detach external encoder experiment:
-# export GVT_STREAM_EXTERNAL=1
-# export GVT_STREAMD_SOCKET=/root/qemu_cmd/win10-gvt-streamd.sock
-# export GVT_STREAM_EXTERNAL_CPU_CACHE=0
+export GVT_STREAMD_SOCKET=/root/qemu_cmd/win10-gvt-streamd.sock
 
 /usr/local/src/project/qemu/build/qemu-system-x86_64 \
   --nodefaults -enable-kvm -cpu host -m 4096 -smp 4 -boot order=c \
-  -display gvt-stream,rendernode=/dev/dri/renderD128,codec=h264,port=5004 \
+  -display gvt-stream,rendernode=/dev/dri/renderD128,codec=h265,port=5004 \
   -spice port=5900,addr=0.0.0.0,disable-ticketing=on,agent-mouse=off,playback-compression=off,streaming-video=off,image-compression=off,disable-copy-paste=on,disable-agent-file-xfer=on,display=none \
   -device vfio-pci-nohotplug,sysfsdev=/sys/bus/pci/devices/0000:00:02.0/<VGPU_UUID>,display=on,x-igd-opregion=on,ramfb=on \
   -hda /path/to/win10.qcow2 \
@@ -272,7 +268,7 @@ BR_IF=br0
 VIDEO_PORT=5004
 SPICE_PORT=5900
 INPUT_PORT=5905
-CODEC=h264
+CODEC=h265
 ```
 
 Then manage the VM:
@@ -296,53 +292,43 @@ systemctl stop gvt-qemu@win10.service
 The runner configures the same runtime environment used above:
 `LD_LIBRARY_PATH`, `GST_PLUGIN_PATH`, `GST_PLUGIN_SYSTEM_PATH_1_0`,
 `LIBVA_DRIVER_NAME=iHD`, `LIBVA_DRIVERS_PATH`, `GVT_STREAM_*` ports, capture
-timing, and FEC disabled by default.
-
-To run the current-detach external encoder experiment through the systemd
-wrapper, set `GVT_STREAM_EXTERNAL=1` in the VM config. `gvt-qm-run` starts
+timing, and FEC disabled by default. `gvt-qm-run` always starts
 `/usr/local/bin/gvt-streamd`, waits for `GVT_STREAMD_SOCKET`, exports the
-socket path to QEMU, and removes the helper process/socket when QEMU exits.
-The helper log defaults to `/root/qemu_cmd/<vm-id>-gvt-streamd.log`.
+socket path to QEMU, monitors the helper, and removes the helper process/socket
+when QEMU exits. The helper log defaults to
+`/root/qemu_cmd/<vm-id>-gvt-streamd.log`.
 
 ## Encoding And Control Behavior
 
-`gvt-stream` listens to QEMU's GL/DMABUF display callbacks. The primary path
-pushes GVT-g scanout DMABUFs into GStreamer and VAAPI:
-
-```text
-GVT-g VFIO DMABUF -> QEMU gvt-stream -> appsrc -> VAAPI postproc/encoder -> RTP
-```
-
-With `GVT_STREAM_EXTERNAL=1`, the video path becomes:
+`gvt-stream` listens to QEMU's GL/DMABUF display callbacks. QEMU forwards
+scanout DMABUF fds to `gvt-streamd`; the encoder and RTP sender are no longer
+linked into QEMU:
 
 ```text
 GVT-g VFIO DMABUF -> QEMU gvt-stream -> Unix SOCK_SEQPACKET/SCM_RIGHTS
   -> gvt-streamd appsrc -> VAAPI postproc/encoder -> RTP
 ```
 
-The v1 external IPC supports only one-plane `XR24/BGRx` DMABUF frames. CPU raw
-frame IPC is intentionally unsupported; `GVT_STREAM_EXTERNAL_CPU_CACHE=0` is the
-default and prevents periodic QEMU-side cached-frame readback in external mode.
+The v1 IPC supports only one-plane `XR24/BGRx` DMABUF frames. CPU raw frame IPC
+and the previous in-QEMU encoder/RTP path are intentionally removed.
 
-The backend supports H.264 by default and H.265/HEVC when requested. Useful
-runtime knobs:
+The backend defaults to H.265/HEVC and still accepts H.264 when the client asks
+for it. Useful runtime knobs:
 
 - `GVT_STREAM_VIDEO_CODEC=h264|h265`
-- `GVT_STREAM_ENCODE_PATH=dmabuf|cpu`
 - `GVT_STREAM_ENCODE_BITRATE=18000`
 - `GVT_STREAM_ENCODE_RATE_CONTROL=cbr`
 - `GVT_STREAM_RTP_FEC=0`
 - `GVT_STREAM_RTP_FEC_IMPORTANT=0`
-- `GVT_STREAM_EXTERNAL=1`
 - `GVT_STREAMD_SOCKET=/root/qemu_cmd/<vm-id>-gvt-streamd.sock`
-- `GVT_STREAM_EXTERNAL_CPU_CACHE=0`
 - `GVT_STREAM_IDLE_CAPTURE_MS`, `GVT_STREAM_IDLE_AFTER_MS`,
   `GVT_STREAM_IDLE_PROBE_MS` for optional power-saving behavior
 
 When the client disconnects, the active control connection closes and QEMU
-stops encoding. When the guest display sleeps or scanout disappears, QEMU keeps
-a cached frame, sends it first on reconnect, sends a wakeup pulse, and switches
-back to the live DMABUF path when scanout returns.
+asks `gvt-streamd` to stop encoding. When the guest display sleeps or scanout
+disappears, QEMU sends a no-scanout notification, sends a wakeup pulse, and
+`gvt-streamd` can continue serving its cached last frame until live DMABUF frames
+return.
 
 ## Verification
 
@@ -351,14 +337,7 @@ Expected log lines:
 ```text
 gvt-stream-input: listening on 0.0.0.0:5905
 gvt-stream-control: listening on 0.0.0.0:5004
-gvt-stream: encode-start ... path=dmabuf
-gvt-stream: update-stats ... encode_failures=0
-```
-
-External-mode expected log lines:
-
-```text
-gvt-qm-run: external=1 streamd_socket=...
+gvt-qm-run: streamd_socket=...
 gvt-stream-external: connected socket=...
 gvt-stream-external: frame-sent ...
 gvt-streamd: encode-start ...
@@ -373,31 +352,30 @@ gvt-stream: cached-frame-save reason=live-refresh
 gvt-stream: encode-start ... path=dmabuf
 ```
 
-Those lines should not appear while `GVT_STREAM_EXTERNAL=1` and
-`GVT_STREAM_EXTERNAL_CPU_CACHE=0`.
+Those lines should not appear in the current streamd-only QEMU path.
 
 Reconnect/sleep validation should show one or more of:
 
 ```text
-gvt-stream: cached-frame-save ...
-gvt-stream: cached-frame-push ...
+gvt-stream-external: no-scanout ...
 gvt-stream-control: wakeup requested from suspended VM
 gvt-stream-control: wakeup input pulse sent reason=no-scanout
-gvt-stream: encode-restart old_path=cpu ... new_path=dmabuf
+gvt-streamd: no-scanout ...
 ```
 
-After client stop/disconnect, `encoded=` in later `update-stats` lines should
-stop increasing.
+After client stop/disconnect, `streamd_encoded=` in later `update-stats` lines
+should stop increasing.
 
 ## Troubleshooting
 
 - If `-display gvt-stream` is unknown, the patch was not applied or QAPI files
   were not regenerated by the QEMU build.
-- If GStreamer dependencies are missing, Meson will fail while resolving
-  `gstreamer-*` or `libdrm`.
+- If `gvt-streamd` dependencies are missing, `scripts/build-gvt-streamd` will
+  fail while resolving `gstreamer-*` or `libdrm`.
 - If VAAPI encode fails, verify `vainfo --display drm --device /dev/dri/renderD128`
-  and `gst-inspect-1.0 vaapih264enc`.
-- If the guest shows no live frame after sleep, check for cached-frame and
-  wakeup log lines first, then confirm the Windows guest actually resumed.
+  and `gst-inspect-1.0 vaapih265enc`.
+- If the guest shows no live frame after sleep, check for no-scanout, streamd
+  cached-frame, and wakeup log lines first, then confirm the Windows guest
+  actually resumed.
 - Do not mix this route with the removed legacy experiments. The current branch
   is intentionally only the QEMU `gvt-stream` path.

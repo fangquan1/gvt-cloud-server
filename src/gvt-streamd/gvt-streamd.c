@@ -3,7 +3,7 @@
  *
  * Receives single-plane XR24/BGRx DMABUF frames from QEMU over a Unix
  * SOCK_SEQPACKET socket and encodes them to RTP with the same GStreamer/VAAPI
- * pipeline shape used by the in-QEMU prototype.
+ * pipeline shape used by the earlier prototype, now outside QEMU.
  */
 
 #include <errno.h>
@@ -108,7 +108,7 @@ static bool streamd_message_valid(const GVTStreamIpcMessage *msg, ssize_t len)
 
 static const char *streamd_codec(GVTStreamd *s)
 {
-    return s->codec[0] ? s->codec : "h264";
+    return s->codec[0] ? s->codec : "h265";
 }
 
 static const char *streamd_rate_control(GVTStreamd *s)
@@ -534,7 +534,7 @@ static void streamd_apply_start(GVTStreamd *s, const GVTStreamIpcMessage *msg)
     s->rtp_fec = msg->rtp_fec;
     s->rtp_fec_important = msg->rtp_fec_important;
     g_strlcpy(s->host, msg->host, sizeof(s->host));
-    g_strlcpy(s->codec, msg->codec[0] ? msg->codec : "h264",
+    g_strlcpy(s->codec, msg->codec[0] ? msg->codec : "h265",
               sizeof(s->codec));
     if (!g_ascii_strcasecmp(s->codec, "hevc")) {
         g_strlcpy(s->codec, "h265", sizeof(s->codec));
@@ -838,7 +838,7 @@ int main(int argc, char **argv)
     s.still_bitrate = 18000;
     s.keyint = 59;
     s.mtu = 1400;
-    g_strlcpy(s.codec, "h264", sizeof(s.codec));
+    g_strlcpy(s.codec, "h265", sizeof(s.codec));
     g_strlcpy(s.rate_control, "cbr", sizeof(s.rate_control));
 
     socket_path = g_getenv("GVT_STREAMD_SOCKET");

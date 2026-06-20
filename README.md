@@ -6,7 +6,7 @@ This repository keeps the host/QEMU display path plus a minimal systemd runner:
 
 - `src/qemu/gvt-stream.c`: the current QEMU `gvt-stream` display backend.
 - `src/qemu/gvt-stream-ipc.h`: v1 QEMU-to-streamd IPC message format.
-- `src/gvt-streamd/gvt-streamd.c`: experimental standalone DMABUF encoder.
+- `src/gvt-streamd/gvt-streamd.c`: standalone DMABUF encoder process.
 - `patches/qemu-gvt-stream.patch`: the patch to apply to a QEMU source tree.
 - `SERVER.md`: build, run, verification, and troubleshooting notes.
 - `deploy/systemd/gvt-qemu@.service`: optional systemd unit for QEMU VMs.
@@ -19,15 +19,15 @@ Git history if they are ever needed for reference.
 
 Current baseline:
 
-- GVT-g VFIO display DMABUF is consumed inside QEMU.
-- VAAPI/GStreamer encodes H.264 or H.265 RTP video.
+- GVT-g VFIO display DMABUF is consumed by QEMU and forwarded to `gvt-streamd`.
+- VAAPI/GStreamer encoding and RTP sending happen only in `gvt-streamd`.
+- H.265 is the default codec; H.264 remains available as a client-selected mode.
 - SPICE is retained for audio/session, not primary video.
 - QEMU native TCP input is handled by the `gvt-stream` backend.
 - Client disconnect stops encoding.
 - Guest display sleep/no-scanout reconnect is handled by cached frame fallback
-  plus wakeup and automatic return to DMABUF encoding.
-- On `current-detach`, `GVT_STREAM_EXTERNAL=1` enables an experimental
-  `gvt-streamd` process that receives scanout DMABUF fds from QEMU and performs
-  RTP encoding outside the QEMU process. The default remains the in-QEMU path.
+  in `gvt-streamd` plus wakeup and automatic return to live DMABUF frames.
+- The old in-QEMU encoder/RTP sender has been removed; `current-detach` is now
+  the future mainline shape to merge into `current`.
 
 Start with [SERVER.md](SERVER.md).

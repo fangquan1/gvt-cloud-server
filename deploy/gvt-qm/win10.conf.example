@@ -21,7 +21,7 @@ MEMORY_MIB=4096
 VIDEO_PORT=5004
 SPICE_PORT=5900
 INPUT_PORT=5905
-CODEC=h264
+CODEC=h265
 
 QEMU_LOG=/root/qemu_cmd/win10-gvt-stream-manual.log
 PID_FILE=/root/qemu_cmd/win10-gvt-stream-manual.pid
@@ -32,15 +32,12 @@ CAPTURE_MS=17
 IDLE_CAPTURE_MS=17
 IDLE_AFTER_MS=0
 IDLE_PROBE_MS=0
-CACHE_REFRESH_MS=0
 ENCODE_FPS=59
 ENCODE_BITRATE=18000
 ENCODE_KEYINT=59
 RTP_MTU=1400
 
-# Experimental external encoder path. Keep disabled unless testing
-# current-detach streamd detachment.
-GVT_STREAM_EXTERNAL=0
+# The encoder is always the standalone gvt-streamd process. QEMU only forwards
+# scanout DMABUF fds to this socket.
 # GVT_STREAMD_BIN=/usr/local/bin/gvt-streamd
 # GVT_STREAMD_SOCKET=/root/qemu_cmd/win10-gvt-streamd.sock
-# GVT_STREAM_EXTERNAL_CPU_CACHE=0

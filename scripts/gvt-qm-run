@@ -28,7 +28,7 @@ BR_IF=${BR_IF:-br0}
 MAC=${MAC:-52:54:00:10:00:88}
 VCPUS=${VCPUS:-4}
 MEMORY_MIB=${MEMORY_MIB:-4096}
-CODEC=${CODEC:-h264}
+CODEC=${CODEC:-h265}
 VIDEO_PORT=${VIDEO_PORT:-5004}
 SPICE_PORT=${SPICE_PORT:-5900}
 INPUT_PORT=${INPUT_PORT:-5905}
@@ -42,12 +42,10 @@ CAPTURE_MS=${CAPTURE_MS:-17}
 IDLE_CAPTURE_MS=${IDLE_CAPTURE_MS:-17}
 IDLE_AFTER_MS=${IDLE_AFTER_MS:-0}
 IDLE_PROBE_MS=${IDLE_PROBE_MS:-0}
-CACHE_REFRESH_MS=${CACHE_REFRESH_MS:-0}
 ENCODE_FPS=${ENCODE_FPS:-59}
 ENCODE_BITRATE=${ENCODE_BITRATE:-18000}
 ENCODE_KEYINT=${ENCODE_KEYINT:-59}
 RTP_MTU=${RTP_MTU:-1400}
-GVT_STREAM_EXTERNAL=${GVT_STREAM_EXTERNAL:-0}
 GVT_STREAMD_BIN=${GVT_STREAMD_BIN:-/usr/local/bin/gvt-streamd}
 GVT_STREAMD_SOCKET=${GVT_STREAMD_SOCKET:-$QEMU_DIR/$VM_ID-gvt-streamd.sock}
 GVT_STREAMD_LOG=${GVT_STREAMD_LOG:-$QEMU_DIR/$VM_ID-gvt-streamd.log}
@@ -147,7 +145,6 @@ export GVT_STREAM_CAPTURE_MS=$CAPTURE_MS
 export GVT_STREAM_IDLE_CAPTURE_MS=$IDLE_CAPTURE_MS
 export GVT_STREAM_IDLE_AFTER_MS=$IDLE_AFTER_MS
 export GVT_STREAM_IDLE_PROBE_MS=$IDLE_PROBE_MS
-export GVT_STREAM_CACHE_REFRESH_MS=${GVT_STREAM_CACHE_REFRESH_MS:-$CACHE_REFRESH_MS}
 export GVT_STREAM_ENCODE_FPS=$ENCODE_FPS
 export GVT_STREAM_ENCODE_BITRATE=$ENCODE_BITRATE
 export GVT_STREAM_ENCODE_KEYINT=$ENCODE_KEYINT
@@ -155,15 +152,13 @@ export GVT_STREAM_RTP_MTU=$RTP_MTU
 export GVT_STREAM_RTP_FEC=${GVT_STREAM_RTP_FEC:-0}
 export GVT_STREAM_RTP_FEC_IMPORTANT=${GVT_STREAM_RTP_FEC_IMPORTANT:-0}
 export GVT_STREAM_IMPORT_TEST=${GVT_STREAM_IMPORT_TEST:-0}
-export GVT_STREAM_EXTERNAL
 export GVT_STREAMD_SOCKET
-export GVT_STREAM_EXTERNAL_CPU_CACHE=${GVT_STREAM_EXTERNAL_CPU_CACHE:-0}
 
 echo $$ > "$PID_FILE"
 exec >>"$QEMU_LOG" 2>&1
 echo "gvt-qm-run: vm=$VM_ID qemu=$QEMU_BIN disk=$VM_DISK tap=$TAP_IF bridge=$BR_IF"
 echo "gvt-qm-run: ports control/video=$VIDEO_PORT spice=$SPICE_PORT input=$INPUT_PORT codec=$CODEC"
-echo "gvt-qm-run: external=$GVT_STREAM_EXTERNAL streamd_socket=$GVT_STREAMD_SOCKET streamd_log=$GVT_STREAMD_LOG"
+echo "gvt-qm-run: streamd_socket=$GVT_STREAMD_SOCKET streamd_log=$GVT_STREAMD_LOG"
 
 qemu_args=(
   --nodefaults -enable-kvm -cpu host -m "$MEMORY_MIB" -smp "$VCPUS" -boot order=c
@@ -190,33 +185,29 @@ if [ -n "$EXTRA_QEMU_ARGS" ]; then
   qemu_args+=( "${extra_args[@]}" )
 fi
 
-if [[ "$GVT_STREAM_EXTERNAL" == "1" || "$GVT_STREAM_EXTERNAL" == "true" || "$GVT_STREAM_EXTERNAL" == "yes" ]]; then
-  qemu_pid=0
-  terminate_external() {
-    if [ "$qemu_pid" -gt 0 ]; then
-      kill "$qemu_pid" 2>/dev/null || true
-      wait "$qemu_pid" 2>/dev/null || true
-    fi
-    cleanup_streamd
-  }
-  trap terminate_external INT TERM EXIT
-
-  start_streamd 1
-  "$QEMU_BIN" "${qemu_args[@]}" &
-  qemu_pid=$!
-  while process_alive "$qemu_pid"; do
-    if ! streamd_alive; then
-      echo "gvt-qm-run: streamd exited; restarting socket=$GVT_STREAMD_SOCKET"
-      start_streamd 0
-    fi
-    sleep 1
-  done
-  wait "$qemu_pid"
-  qemu_status=$?
-  qemu_pid=0
-  trap - INT TERM EXIT
+qemu_pid=0
+terminate_external() {
+  if [ "$qemu_pid" -gt 0 ]; then
+    kill "$qemu_pid" 2>/dev/null || true
+    wait "$qemu_pid" 2>/dev/null || true
+  fi
   cleanup_streamd
-  exit "$qemu_status"
-fi
+}
+trap terminate_external INT TERM EXIT
 
-exec "$QEMU_BIN" "${qemu_args[@]}"
+start_streamd 1
+"$QEMU_BIN" "${qemu_args[@]}" &
+qemu_pid=$!
+while process_alive "$qemu_pid"; do
+  if ! streamd_alive; then
+    echo "gvt-qm-run: streamd exited; restarting socket=$GVT_STREAMD_SOCKET"
+    start_streamd 0
+  fi
+  sleep 1
+done
+wait "$qemu_pid"
+qemu_status=$?
+qemu_pid=0
+trap - INT TERM EXIT
+cleanup_streamd
+exit "$qemu_status"
