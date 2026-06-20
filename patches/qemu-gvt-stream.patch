@@ -179,6 +179,8 @@ index 0000000..37a593b
 +#define GVT_STREAM_IDLE_SAMPLE_N \
 +    (GVT_STREAM_IDLE_SAMPLE_W * GVT_STREAM_IDLE_SAMPLE_H)
 +#define GVT_STREAM_FOURCC_XR24 0x34325258u
++#define GVT_STREAM_WAKE_PUMP_NO_SCANOUT_MS 5000u
++#define GVT_STREAM_WAKE_PUMP_SUSPENDED_MS 45000u
 +typedef struct GVTStreamDisplay {
 +    DisplayChangeListener dcl;
 +    QemuDmaBuf *scanout;
@@ -1278,15 +1280,24 @@ index 0000000..37a593b
 +
 +static void gvt_stream_control_wakeup_input_pulse(const char *reason)
 +{
++    static bool toggle;
++    int center = INPUT_EVENT_ABS_MAX / 2;
++    int delta = INPUT_EVENT_ABS_MAX / 64;
++    int pos = center + (toggle ? delta : -delta);
++
++    toggle = !toggle;
 +    qemu_input_queue_abs(NULL, INPUT_AXIS_X,
-+                         INPUT_EVENT_ABS_MAX / 2,
++                         pos,
 +                         INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX);
 +    qemu_input_queue_abs(NULL, INPUT_AXIS_Y,
-+                         INPUT_EVENT_ABS_MAX / 2,
++                         pos,
 +                         INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX);
 +    qemu_input_event_sync();
-+    error_report("gvt-stream-control: wakeup input pulse sent reason=%s",
-+                 reason ?: "unknown");
++    qemu_input_event_send_key_qcode(NULL, Q_KEY_CODE_WAKE, true);
++    qemu_input_event_send_key_qcode(NULL, Q_KEY_CODE_WAKE, false);
++    error_report("gvt-stream-control: wakeup input pulse sent reason=%s pos=%d "
++                 "key=wake",
++                 reason ?: "unknown", pos);
 +}
 +
 +static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
@@ -1364,8 +1375,12 @@ index 0000000..37a593b
 +    }
 +    gvt_stream_startup_pump_arm(gdpy, gvt_stream_last_input_ms);
 +    if ((was_suspended || !gdpy->scanout) && gdpy->startup_pump_until_ms &&
-+        gdpy->startup_pump_ms < (was_suspended ? 15000 : 5000)) {
-+        uint64_t extend_ms = was_suspended ? 15000 : 5000;
++        gdpy->startup_pump_ms < (was_suspended ?
++                                 GVT_STREAM_WAKE_PUMP_SUSPENDED_MS :
++                                 GVT_STREAM_WAKE_PUMP_NO_SCANOUT_MS)) {
++        uint64_t extend_ms = was_suspended ?
++                             GVT_STREAM_WAKE_PUMP_SUSPENDED_MS :
++                             GVT_STREAM_WAKE_PUMP_NO_SCANOUT_MS;
 +        gdpy->startup_pump_until_ms = gvt_stream_last_input_ms + extend_ms;
 +        error_report("gvt-stream-control: startup pump extended after %s "
 +                     "duration_ms=%" PRIu64,
