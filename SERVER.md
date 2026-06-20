@@ -180,14 +180,24 @@ For an already patched tree, copy only the current backend source and rebuild:
 ```bash
 install -m 0644 /path/to/gvt-cloud-server/src/qemu/gvt-stream.c \
   /usr/local/src/project/qemu/ui/gvt-stream.c
+install -m 0644 /path/to/gvt-cloud-server/src/qemu/gvt-stream-ipc.h \
+  /usr/local/src/project/qemu/ui/gvt-stream-ipc.h
 ninja -C /usr/local/src/project/qemu/build qemu-system-x86_64
 ```
 
 The patch adds:
 
 - `ui/gvt-stream.c`
+- `ui/gvt-stream-ipc.h`
 - `ui/meson.build` registration for the `gvt-stream` UI module
 - `qapi/ui.json` support for `-display gvt-stream,...`
+
+Build the experimental external encoder helper:
+
+```bash
+cd /usr/local/src/project/gvt-cloud-server
+bash scripts/build-gvt-streamd /usr/local/bin/gvt-streamd
+```
 
 ## Run
 
@@ -200,6 +210,10 @@ export GVT_STREAM_VERBOSE=0
 export GVT_STREAM_SPICE_PORT=5900
 export GVT_STREAM_STARTUP_PUMP_MS=1500
 export GVT_STREAM_CACHE_REFRESH_MS=1000
+# Optional current-detach external encoder experiment:
+# export GVT_STREAM_EXTERNAL=1
+# export GVT_STREAMD_SOCKET=/root/qemu_cmd/win10-gvt-streamd.sock
+# export GVT_STREAM_EXTERNAL_CPU_CACHE=0
 
 /usr/local/src/project/qemu/build/qemu-system-x86_64 \
   --nodefaults -enable-kvm -cpu host -m 4096 -smp 4 -boot order=c \
@@ -284,6 +298,12 @@ The runner configures the same runtime environment used above:
 `LIBVA_DRIVER_NAME=iHD`, `LIBVA_DRIVERS_PATH`, `GVT_STREAM_*` ports, capture
 timing, and FEC disabled by default.
 
+To run the current-detach external encoder experiment through the systemd
+wrapper, set `GVT_STREAM_EXTERNAL=1` in the VM config. `gvt-qm-run` starts
+`/usr/local/bin/gvt-streamd`, waits for `GVT_STREAMD_SOCKET`, exports the
+socket path to QEMU, and removes the helper process/socket when QEMU exits.
+The helper log defaults to `/root/qemu_cmd/<vm-id>-gvt-streamd.log`.
+
 ## Encoding And Control Behavior
 
 `gvt-stream` listens to QEMU's GL/DMABUF display callbacks. The primary path
@@ -292,6 +312,17 @@ pushes GVT-g scanout DMABUFs into GStreamer and VAAPI:
 ```text
 GVT-g VFIO DMABUF -> QEMU gvt-stream -> appsrc -> VAAPI postproc/encoder -> RTP
 ```
+
+With `GVT_STREAM_EXTERNAL=1`, the video path becomes:
+
+```text
+GVT-g VFIO DMABUF -> QEMU gvt-stream -> Unix SOCK_SEQPACKET/SCM_RIGHTS
+  -> gvt-streamd appsrc -> VAAPI postproc/encoder -> RTP
+```
+
+The v1 external IPC supports only one-plane `XR24/BGRx` DMABUF frames. CPU raw
+frame IPC is intentionally unsupported; `GVT_STREAM_EXTERNAL_CPU_CACHE=0` is the
+default and prevents periodic QEMU-side cached-frame readback in external mode.
 
 The backend supports H.264 by default and H.265/HEVC when requested. Useful
 runtime knobs:
@@ -302,6 +333,9 @@ runtime knobs:
 - `GVT_STREAM_ENCODE_RATE_CONTROL=cbr`
 - `GVT_STREAM_RTP_FEC=0`
 - `GVT_STREAM_RTP_FEC_IMPORTANT=0`
+- `GVT_STREAM_EXTERNAL=1`
+- `GVT_STREAMD_SOCKET=/root/qemu_cmd/<vm-id>-gvt-streamd.sock`
+- `GVT_STREAM_EXTERNAL_CPU_CACHE=0`
 - `GVT_STREAM_IDLE_CAPTURE_MS`, `GVT_STREAM_IDLE_AFTER_MS`,
   `GVT_STREAM_IDLE_PROBE_MS` for optional power-saving behavior
 
@@ -320,6 +354,27 @@ gvt-stream-control: listening on 0.0.0.0:5004
 gvt-stream: encode-start ... path=dmabuf
 gvt-stream: update-stats ... encode_failures=0
 ```
+
+External-mode expected log lines:
+
+```text
+gvt-qm-run: external=1 streamd_socket=...
+gvt-stream-external: connected socket=...
+gvt-stream-external: frame-sent ...
+gvt-streamd: encode-start ...
+gvt-streamd: dmabuf-push-ok ...
+gvt-stream: update-stats ... encoded=0 ... external_sent=... streamd_encoded=...
+```
+
+External-mode negative checks:
+
+```text
+gvt-stream: cached-frame-save reason=live-refresh
+gvt-stream: encode-start ... path=dmabuf
+```
+
+Those lines should not appear while `GVT_STREAM_EXTERNAL=1` and
+`GVT_STREAM_EXTERNAL_CPU_CACHE=0`.
 
 Reconnect/sleep validation should show one or more of:
 

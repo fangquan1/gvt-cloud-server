@@ -37,3 +37,10 @@ ENCODE_FPS=59
 ENCODE_BITRATE=18000
 ENCODE_KEYINT=59
 RTP_MTU=1400
+
+# Experimental external encoder path. Keep disabled unless testing
+# current-detach streamd detachment.
+GVT_STREAM_EXTERNAL=0
+# GVT_STREAMD_BIN=/usr/local/bin/gvt-streamd
+# GVT_STREAMD_SOCKET=/root/qemu_cmd/win10-gvt-streamd.sock
+# GVT_STREAM_EXTERNAL_CPU_CACHE=0

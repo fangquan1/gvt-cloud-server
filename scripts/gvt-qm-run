@@ -47,6 +47,11 @@ ENCODE_FPS=${ENCODE_FPS:-59}
 ENCODE_BITRATE=${ENCODE_BITRATE:-18000}
 ENCODE_KEYINT=${ENCODE_KEYINT:-59}
 RTP_MTU=${RTP_MTU:-1400}
+GVT_STREAM_EXTERNAL=${GVT_STREAM_EXTERNAL:-0}
+GVT_STREAMD_BIN=${GVT_STREAMD_BIN:-/usr/local/bin/gvt-streamd}
+GVT_STREAMD_SOCKET=${GVT_STREAMD_SOCKET:-$QEMU_DIR/$VM_ID-gvt-streamd.sock}
+GVT_STREAMD_LOG=${GVT_STREAMD_LOG:-$QEMU_DIR/$VM_ID-gvt-streamd.log}
+GVT_STREAMD_PID_FILE=${GVT_STREAMD_PID_FILE:-$QEMU_DIR/$VM_ID-gvt-streamd.pid}
 EXTRA_QEMU_ARGS=${EXTRA_QEMU_ARGS:-}
 
 mkdir -p "$QEMU_DIR"
@@ -56,6 +61,41 @@ cleanup_tap() {
   ip link set "$TAP_IF" nomaster 2>/dev/null || true
   ip link delete "$TAP_IF" 2>/dev/null || true
   ip tuntap del dev "$TAP_IF" mode tap 2>/dev/null || true
+}
+
+cleanup_streamd() {
+  if [ -s "$GVT_STREAMD_PID_FILE" ]; then
+    local pid
+    pid=$(cat "$GVT_STREAMD_PID_FILE" 2>/dev/null || true)
+    if [[ "$pid" =~ ^[0-9]+$ ]]; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$GVT_STREAMD_PID_FILE" "$GVT_STREAMD_SOCKET"
+}
+
+start_streamd() {
+  if [ ! -x "$GVT_STREAMD_BIN" ]; then
+    echo "missing executable gvt-streamd: $GVT_STREAMD_BIN" >&2
+    exit 1
+  fi
+
+  cleanup_streamd
+  rm -f "$GVT_STREAMD_LOG"
+  "$GVT_STREAMD_BIN" --socket "$GVT_STREAMD_SOCKET" >>"$GVT_STREAMD_LOG" 2>&1 &
+  echo $! > "$GVT_STREAMD_PID_FILE"
+
+  for _ in $(seq 1 50); do
+    if [ -S "$GVT_STREAMD_SOCKET" ]; then
+      return
+    fi
+    sleep 0.1
+  done
+
+  echo "gvt-streamd did not create socket: $GVT_STREAMD_SOCKET" >&2
+  cleanup_streamd
+  exit 1
 }
 
 cleanup_tap
@@ -88,27 +128,61 @@ export GVT_STREAM_RTP_MTU=$RTP_MTU
 export GVT_STREAM_RTP_FEC=${GVT_STREAM_RTP_FEC:-0}
 export GVT_STREAM_RTP_FEC_IMPORTANT=${GVT_STREAM_RTP_FEC_IMPORTANT:-0}
 export GVT_STREAM_IMPORT_TEST=${GVT_STREAM_IMPORT_TEST:-0}
+export GVT_STREAM_EXTERNAL
+export GVT_STREAMD_SOCKET
+export GVT_STREAM_EXTERNAL_CPU_CACHE=${GVT_STREAM_EXTERNAL_CPU_CACHE:-0}
 
 echo $$ > "$PID_FILE"
 exec >>"$QEMU_LOG" 2>&1
 echo "gvt-qm-run: vm=$VM_ID qemu=$QEMU_BIN disk=$VM_DISK tap=$TAP_IF bridge=$BR_IF"
 echo "gvt-qm-run: ports control/video=$VIDEO_PORT spice=$SPICE_PORT input=$INPUT_PORT codec=$CODEC"
+echo "gvt-qm-run: external=$GVT_STREAM_EXTERNAL streamd_socket=$GVT_STREAMD_SOCKET streamd_log=$GVT_STREAMD_LOG"
 
-exec "$QEMU_BIN" \
-  --nodefaults -enable-kvm -cpu host -m "$MEMORY_MIB" -smp "$VCPUS" -boot order=c \
-  -display "gvt-stream,rendernode=$RENDER_NODE,codec=$CODEC,port=$VIDEO_PORT" \
-  -spice "port=$SPICE_PORT,addr=0.0.0.0,disable-ticketing=on,agent-mouse=off,playback-compression=off,streaming-video=off,image-compression=off,disable-copy-paste=on,disable-agent-file-xfer=on,display=none" \
-  -device "vfio-pci-nohotplug,sysfsdev=$VFIO_DEVICE,display=on,x-igd-opregion=on,ramfb=on" \
-  -hda "$VM_DISK" \
-  -netdev "tap,id=net0,ifname=$TAP_IF,script=no,downscript=no" \
-  -device "e1000e,netdev=net0,mac=$MAC" \
-  -k en-us -device qemu-xhci -device usb-tablet -device usb-kbd \
-  -device virtio-serial-pci \
-  -chardev "socket,path=$QGA_SOCK,server=on,wait=off,id=qga0" \
-  -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
-  -audiodev spice,id=audio0,timer-period=5000,out.frequency=48000,out.channels=2,out.format=s16,out.buffer-length=100000 \
-  -device ich9-intel-hda \
-  -device hda-duplex,audiodev=audio0 \
-  -monitor "unix:$MONITOR_SOCK,server,nowait" \
-  -qmp "unix:$QMP_SOCK,server,nowait" \
-  $EXTRA_QEMU_ARGS
+qemu_args=(
+  --nodefaults -enable-kvm -cpu host -m "$MEMORY_MIB" -smp "$VCPUS" -boot order=c
+  -display "gvt-stream,rendernode=$RENDER_NODE,codec=$CODEC,port=$VIDEO_PORT"
+  -spice "port=$SPICE_PORT,addr=0.0.0.0,disable-ticketing=on,agent-mouse=off,playback-compression=off,streaming-video=off,image-compression=off,disable-copy-paste=on,disable-agent-file-xfer=on,display=none"
+  -device "vfio-pci-nohotplug,sysfsdev=$VFIO_DEVICE,display=on,x-igd-opregion=on,ramfb=on"
+  -hda "$VM_DISK"
+  -netdev "tap,id=net0,ifname=$TAP_IF,script=no,downscript=no"
+  -device "e1000e,netdev=net0,mac=$MAC"
+  -k en-us -device qemu-xhci -device usb-tablet -device usb-kbd
+  -device virtio-serial-pci
+  -chardev "socket,path=$QGA_SOCK,server=on,wait=off,id=qga0"
+  -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0
+  -audiodev spice,id=audio0,timer-period=5000,out.frequency=48000,out.channels=2,out.format=s16,out.buffer-length=100000
+  -device ich9-intel-hda
+  -device hda-duplex,audiodev=audio0
+  -monitor "unix:$MONITOR_SOCK,server,nowait"
+  -qmp "unix:$QMP_SOCK,server,nowait"
+)
+
+if [ -n "$EXTRA_QEMU_ARGS" ]; then
+  # shellcheck disable=SC2206
+  extra_args=( $EXTRA_QEMU_ARGS )
+  qemu_args+=( "${extra_args[@]}" )
+fi
+
+if [[ "$GVT_STREAM_EXTERNAL" == "1" || "$GVT_STREAM_EXTERNAL" == "true" || "$GVT_STREAM_EXTERNAL" == "yes" ]]; then
+  qemu_pid=0
+  terminate_external() {
+    if [ "$qemu_pid" -gt 0 ]; then
+      kill "$qemu_pid" 2>/dev/null || true
+      wait "$qemu_pid" 2>/dev/null || true
+    fi
+    cleanup_streamd
+  }
+  trap terminate_external INT TERM EXIT
+
+  start_streamd
+  "$QEMU_BIN" "${qemu_args[@]}" &
+  qemu_pid=$!
+  wait "$qemu_pid"
+  qemu_status=$?
+  qemu_pid=0
+  trap - INT TERM EXIT
+  cleanup_streamd
+  exit "$qemu_status"
+fi
+
+exec "$QEMU_BIN" "${qemu_args[@]}"

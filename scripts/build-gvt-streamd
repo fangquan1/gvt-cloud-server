@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+out=${1:-$repo_dir/build/gvt-streamd}
+cc=${CC:-gcc}
+
+mkdir -p "$(dirname "$out")"
+
+pkg_config=${PKG_CONFIG:-pkg-config}
+packages=(
+  glib-2.0
+  gstreamer-1.0
+  gstreamer-app-1.0
+  gstreamer-allocators-1.0
+  gstreamer-video-1.0
+)
+
+cflags=$("$pkg_config" --cflags "${packages[@]}")
+libs=$("$pkg_config" --libs "${packages[@]}")
+
+# shellcheck disable=SC2086
+"$cc" -Wall -Wextra -O2 -g $cflags \
+  -o "$out" "$repo_dir/src/gvt-streamd/gvt-streamd.c" \
+  $libs
+
+echo "$out"

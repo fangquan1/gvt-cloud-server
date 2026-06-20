@@ -19,6 +19,7 @@
 #include "qobject/qjson.h"
 #include "qobject/qlist.h"
 #include "qobject/qstring.h"
+#include "gvt-stream-ipc.h"
 #include <gst/allocators/gstdmabuf.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
@@ -26,6 +27,8 @@
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include "ui/console.h"
 #include "ui/dmabuf.h"
 #include "ui/input.h"
@@ -37,6 +40,7 @@
 #define GVT_STREAM_IDLE_SAMPLE_H 36
 #define GVT_STREAM_IDLE_SAMPLE_N \
     (GVT_STREAM_IDLE_SAMPLE_W * GVT_STREAM_IDLE_SAMPLE_H)
+#define GVT_STREAM_FOURCC_XR24 0x34325258u
 typedef struct GVTStreamDisplay {
     DisplayChangeListener dcl;
     QemuDmaBuf *scanout;
@@ -123,6 +127,17 @@ typedef struct GVTStreamDisplay {
     egl_fb capture_fb;
     bool verbose;
     bool import_test;
+    bool external;
+    bool external_cpu_cache;
+    char *external_socket;
+    int external_fd;
+    uint64_t external_seq;
+    uint64_t external_frame_count;
+    uint64_t external_no_scanout_count;
+    uint64_t external_send_fail_count;
+    uint64_t external_stats_count;
+    uint64_t external_encoded;
+    uint64_t external_encode_failures;
 } GVTStreamDisplay;
 
 typedef struct GVTStreamInputServer GVTStreamInputServer;
@@ -324,6 +339,330 @@ static int gvt_stream_set_nonblock(int fd)
         return -1;
     }
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+static void gvt_stream_external_close(GVTStreamDisplay *gdpy)
+{
+    if (!gdpy || gdpy->external_fd < 0) {
+        return;
+    }
+
+    qemu_set_fd_handler(gdpy->external_fd, NULL, NULL, NULL);
+    close(gdpy->external_fd);
+    gdpy->external_fd = -1;
+}
+
+static bool gvt_stream_external_message_valid(const GVTStreamIpcMessage *msg,
+                                              ssize_t len)
+{
+    return len == sizeof(*msg) &&
+        msg->magic == GVT_STREAM_IPC_MAGIC &&
+        msg->version == GVT_STREAM_IPC_VERSION &&
+        msg->size == sizeof(*msg);
+}
+
+static void gvt_stream_external_read(void *opaque)
+{
+    GVTStreamDisplay *gdpy = opaque;
+
+    for (;;) {
+        GVTStreamIpcMessage msg;
+        ssize_t ret = recv(gdpy->external_fd, &msg, sizeof(msg), MSG_DONTWAIT);
+
+        if (ret > 0) {
+            if (!gvt_stream_external_message_valid(&msg, ret)) {
+                warn_report("gvt-stream-external: ignoring invalid message bytes=%zd",
+                            ret);
+                continue;
+            }
+            if (msg.type == GVT_STREAM_IPC_STATS) {
+                gdpy->external_stats_count++;
+                gdpy->external_encoded = msg.encoded;
+                gdpy->external_encode_failures = msg.encode_failures;
+                if (gdpy->verbose || gdpy->external_stats_count <= 5 ||
+                    gdpy->external_stats_count % 60 == 0) {
+                    error_report("gvt-stream-external: stats #%" PRIu64
+                                 " encoded=%" PRIu64 " failures=%" PRIu64,
+                                 gdpy->external_stats_count,
+                                 gdpy->external_encoded,
+                                 gdpy->external_encode_failures);
+                }
+            }
+            continue;
+        }
+        if (ret == 0) {
+            warn_report("gvt-stream-external: streamd closed socket");
+            gvt_stream_external_close(gdpy);
+            return;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return;
+        }
+        warn_report("gvt-stream-external: recv failed: %s", strerror(errno));
+        gvt_stream_external_close(gdpy);
+        return;
+    }
+}
+
+static bool gvt_stream_external_connect(GVTStreamDisplay *gdpy)
+{
+    struct sockaddr_un addr = { 0 };
+    int fd;
+    int ret;
+
+    if (!gdpy || !gdpy->external) {
+        return false;
+    }
+    if (gdpy->external_fd >= 0) {
+        return true;
+    }
+    if (!gdpy->external_socket || !*gdpy->external_socket) {
+        warn_report("gvt-stream-external: missing GVT_STREAMD_SOCKET");
+        return false;
+    }
+    if (strlen(gdpy->external_socket) >= sizeof(addr.sun_path)) {
+        warn_report("gvt-stream-external: socket path too long: %s",
+                    gdpy->external_socket);
+        return false;
+    }
+
+    fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    if (fd < 0) {
+        warn_report("gvt-stream-external: socket failed: %s", strerror(errno));
+        return false;
+    }
+    qemu_set_cloexec(fd);
+
+    addr.sun_family = AF_UNIX;
+    g_strlcpy(addr.sun_path, gdpy->external_socket, sizeof(addr.sun_path));
+    do {
+        ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    } while (ret < 0 && errno == EINTR);
+    if (ret < 0) {
+        warn_report("gvt-stream-external: connect %s failed: %s",
+                    gdpy->external_socket, strerror(errno));
+        close(fd);
+        return false;
+    }
+
+    gvt_stream_set_nonblock(fd);
+    gdpy->external_fd = fd;
+    qemu_set_fd_handler(fd, gvt_stream_external_read, NULL, gdpy);
+    error_report("gvt-stream-external: connected socket=%s fd=%d",
+                 gdpy->external_socket, fd);
+    return true;
+}
+
+static void gvt_stream_external_fill_common(GVTStreamDisplay *gdpy,
+                                            GVTStreamIpcMessage *msg,
+                                            GVTStreamIpcType type,
+                                            int64_t now_ms)
+{
+    memset(msg, 0, sizeof(*msg));
+    msg->magic = GVT_STREAM_IPC_MAGIC;
+    msg->version = GVT_STREAM_IPC_VERSION;
+    msg->type = type;
+    msg->size = sizeof(*msg);
+    msg->seq = ++gdpy->external_seq;
+    msg->pts_ns = now_ms > 0 ? (uint64_t)now_ms * 1000000ULL : 0;
+    msg->fps = gdpy->encode_fps;
+    msg->bitrate = gdpy->encode_bitrate;
+    msg->idle_bitrate = gdpy->encode_idle_bitrate;
+    msg->still_bitrate = gdpy->encode_still_bitrate;
+    msg->keyint = gdpy->encode_keyint;
+    msg->mtu = gdpy->rtp_mtu;
+    msg->rtp_port = gdpy->rtp_port;
+    msg->rtp_fec = gdpy->rtp_fec;
+    msg->rtp_fec_important = gdpy->rtp_fec_important;
+    if (gdpy->encode_dmabuf_caps_feature) {
+        msg->flags |= GVT_STREAM_IPC_FLAG_DMABUF_CAPS_FEATURE;
+    }
+    if (gdpy->encode_flip) {
+        msg->flags |= GVT_STREAM_IPC_FLAG_ENCODE_FLIP;
+    }
+    if (gdpy->rtp_host) {
+        g_strlcpy(msg->host, gdpy->rtp_host, sizeof(msg->host));
+    }
+    if (gdpy->video_codec) {
+        g_strlcpy(msg->codec, gdpy->video_codec, sizeof(msg->codec));
+    }
+    if (gdpy->encode_rate_control) {
+        g_strlcpy(msg->rate_control, gdpy->encode_rate_control,
+                  sizeof(msg->rate_control));
+    }
+}
+
+static bool gvt_stream_external_send_message(GVTStreamDisplay *gdpy,
+                                             GVTStreamIpcMessage *msg,
+                                             int fd_to_send)
+{
+    struct iovec iov = {
+        .iov_base = msg,
+        .iov_len = sizeof(*msg),
+    };
+    struct msghdr hdr = {
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+    };
+    char control[CMSG_SPACE(sizeof(int))];
+    ssize_t ret;
+
+    if (!gvt_stream_external_connect(gdpy)) {
+        gdpy->external_send_fail_count++;
+        return false;
+    }
+
+    if (fd_to_send >= 0) {
+        struct cmsghdr *cmsg;
+
+        memset(control, 0, sizeof(control));
+        hdr.msg_control = control;
+        hdr.msg_controllen = sizeof(control);
+        cmsg = CMSG_FIRSTHDR(&hdr);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(cmsg), &fd_to_send, sizeof(int));
+        hdr.msg_controllen = sizeof(control);
+    }
+
+    ret = sendmsg(gdpy->external_fd, &hdr, MSG_NOSIGNAL);
+    if (ret != sizeof(*msg)) {
+        gdpy->external_send_fail_count++;
+        if (ret < 0) {
+            warn_report("gvt-stream-external: send type=%u failed: %s",
+                        msg->type, strerror(errno));
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                gvt_stream_external_close(gdpy);
+            }
+        } else {
+            warn_report("gvt-stream-external: short send type=%u bytes=%zd",
+                        msg->type, ret);
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool gvt_stream_external_send_start(GVTStreamDisplay *gdpy,
+                                           int64_t now_ms)
+{
+    GVTStreamIpcMessage msg;
+    bool ok;
+
+    gvt_stream_external_fill_common(gdpy, &msg, GVT_STREAM_IPC_START,
+                                    now_ms);
+    ok = gvt_stream_external_send_message(gdpy, &msg, -1);
+    if (ok) {
+        error_report("gvt-stream-external: start target=%s:%u codec=%s "
+                     "fps=%u bitrate=%u keyint=%u mtu=%u fec=%u/%u "
+                     "socket=%s",
+                     msg.host, msg.rtp_port, msg.codec,
+                     msg.fps, msg.bitrate, msg.keyint, msg.mtu,
+                     msg.rtp_fec, msg.rtp_fec_important,
+                     gdpy->external_socket ?: "");
+    }
+    return ok;
+}
+
+static void gvt_stream_external_send_stop(GVTStreamDisplay *gdpy,
+                                          int64_t now_ms)
+{
+    GVTStreamIpcMessage msg;
+
+    if (!gdpy || !gdpy->external || gdpy->external_fd < 0) {
+        return;
+    }
+
+    gvt_stream_external_fill_common(gdpy, &msg, GVT_STREAM_IPC_STOP, now_ms);
+    gvt_stream_external_send_message(gdpy, &msg, -1);
+}
+
+static void gvt_stream_external_send_no_scanout(GVTStreamDisplay *gdpy,
+                                                int64_t now_ms)
+{
+    GVTStreamIpcMessage msg;
+
+    if (!gdpy || !gdpy->external || !gdpy->rtp_host || !gdpy->rtp_port) {
+        return;
+    }
+
+    gvt_stream_external_fill_common(gdpy, &msg, GVT_STREAM_IPC_NO_SCANOUT,
+                                    now_ms);
+    if (gvt_stream_external_send_message(gdpy, &msg, -1)) {
+        gdpy->external_no_scanout_count++;
+        if (gdpy->verbose || gdpy->external_no_scanout_count <= 5 ||
+            gdpy->external_no_scanout_count % 60 == 0) {
+            error_report("gvt-stream-external: no-scanout #%" PRIu64
+                         " seq=%" PRIu64,
+                         gdpy->external_no_scanout_count, msg.seq);
+        }
+    }
+}
+
+static bool gvt_stream_external_send_frame(GVTStreamDisplay *gdpy,
+                                           QemuDmaBuf *dmabuf,
+                                           int64_t now_ms)
+{
+    GVTStreamIpcMessage msg;
+    const int *fds;
+    const uint32_t *offsets;
+    const uint32_t *strides;
+    int n_fds = 0;
+    int n_offsets = 0;
+    int n_strides = 0;
+    uint32_t planes;
+    bool ok;
+
+    if (!gdpy || !gdpy->external || !dmabuf ||
+        !gdpy->rtp_host || !gdpy->rtp_port) {
+        return false;
+    }
+
+    planes = qemu_dmabuf_get_num_planes(dmabuf);
+    fds = qemu_dmabuf_get_fds(dmabuf, &n_fds);
+    offsets = qemu_dmabuf_get_offsets(dmabuf, &n_offsets);
+    strides = qemu_dmabuf_get_strides(dmabuf, &n_strides);
+    if (planes != 1 || !fds || n_fds < 1 ||
+        !strides || n_strides < 1 ||
+        !qemu_dmabuf_get_width(dmabuf) ||
+        !qemu_dmabuf_get_height(dmabuf) ||
+        qemu_dmabuf_get_fourcc(dmabuf) != GVT_STREAM_FOURCC_XR24) {
+        gdpy->external_send_fail_count++;
+        error_report("gvt-stream-external: frame-unsupported planes=%u "
+                     "fds=%d strides=%d size=%ux%u fourcc=0x%08x",
+                     planes, n_fds, n_strides,
+                     qemu_dmabuf_get_width(dmabuf),
+                     qemu_dmabuf_get_height(dmabuf),
+                     qemu_dmabuf_get_fourcc(dmabuf));
+        return false;
+    }
+
+    gvt_stream_external_fill_common(gdpy, &msg, GVT_STREAM_IPC_FRAME,
+                                    now_ms);
+    msg.width = qemu_dmabuf_get_width(dmabuf);
+    msg.height = qemu_dmabuf_get_height(dmabuf);
+    msg.fourcc = qemu_dmabuf_get_fourcc(dmabuf);
+    msg.stride = strides[0];
+    msg.offset = (offsets && n_offsets > 0) ? offsets[0] : 0;
+    msg.modifier = qemu_dmabuf_get_modifier(dmabuf);
+
+    ok = gvt_stream_external_send_message(gdpy, &msg, fds[0]);
+    if (ok) {
+        gdpy->external_frame_count++;
+        if (gdpy->verbose || gdpy->external_frame_count <= 5 ||
+            gdpy->external_frame_count % 60 == 0) {
+            error_report("gvt-stream-external: frame-sent #%" PRIu64
+                         " seq=%" PRIu64 " fd=%d size=%ux%u stride=%u "
+                         "modifier=0x%016" PRIx64,
+                         gdpy->external_frame_count, msg.seq, fds[0],
+                         msg.width, msg.height, msg.stride, msg.modifier);
+        }
+    }
+    return ok;
 }
 
 static int64_t gvt_stream_qdict_get_clamped_int(QDict *dict,
@@ -723,11 +1062,15 @@ static void gvt_stream_input_start(uint64_t control_port)
 
 static void gvt_stream_control_apply_stop(GVTStreamDisplay *gdpy)
 {
+    int64_t now_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
     if (!gdpy) {
         return;
     }
     gvt_stream_startup_pump_stop(gdpy);
-    if (gdpy->encode_pipeline) {
+    if (gdpy->external) {
+        gvt_stream_external_send_stop(gdpy, now_ms);
+    } else if (gdpy->encode_pipeline) {
         gvt_stream_encoder_finish(gdpy);
     }
     g_clear_pointer(&gdpy->rtp_host, g_free);
@@ -821,6 +1164,16 @@ static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
                  " input_tcp=%" PRIu64,
                  (unsigned)gdpy->rtp_port, gvt_stream_spice_port,
                  gvt_stream_input_port);
+    if (gdpy->external &&
+        !gvt_stream_external_send_start(gdpy, gvt_stream_last_input_ms)) {
+        warn_report("gvt-stream-control: external streamd start failed");
+        g_clear_pointer(&gdpy->rtp_host, g_free);
+        gdpy->rtp_port = 0;
+        return false;
+    }
+    if (gdpy->external) {
+        gdpy->encode_current_bitrate = gdpy->encode_bitrate;
+    }
     if (gdpy->scanout && !was_suspended) {
         gvt_stream_capture_frame(gdpy, gvt_stream_last_input_ms);
     } else if (gdpy->scanout) {
@@ -1846,7 +2199,7 @@ static void gvt_stream_encoder_push_dmabuf(GVTStreamDisplay *gdpy,
     height = qemu_dmabuf_get_height(dmabuf);
     fourcc = qemu_dmabuf_get_fourcc(dmabuf);
     if (!fds || n_fds < 1 || !strides || n_strides < 1 ||
-        !width || !height || fourcc != 0x34325258) {
+        !width || !height || fourcc != GVT_STREAM_FOURCC_XR24) {
         gdpy->encode_fail_count++;
         error_report("gvt-stream: dmabuf-push-unsupported fds=%d strides=%d "
                      "size=%ux%u fourcc=0x%08x",
@@ -2130,6 +2483,33 @@ static void gvt_stream_capture_frame(GVTStreamDisplay *gdpy, int64_t now_ms)
         return;
     }
 
+    if (gdpy->external) {
+        if (!dmabuf) {
+            gdpy->capture_count++;
+            gdpy->last_capture_ms = now_ms;
+            gvt_stream_external_send_no_scanout(gdpy, now_ms);
+            return;
+        }
+        if (gvt_stream_last_input_seq > 0 &&
+            gvt_stream_last_input_capture_seq != gvt_stream_last_input_seq &&
+            gvt_stream_last_input_ms > 0 &&
+            now_ms - gvt_stream_last_input_ms < 1000) {
+            gvt_stream_last_input_capture_seq = gvt_stream_last_input_seq;
+            error_report("latency-video-after-input seq=%" PRId64
+                         " input_to_capture_ms=%" PRId64
+                         " next_capture=%" PRIu64
+                         " external_sent=%" PRIu64,
+                         gvt_stream_last_input_seq,
+                         now_ms - gvt_stream_last_input_ms,
+                         gdpy->capture_count + 1,
+                         gdpy->external_frame_count);
+        }
+        gdpy->capture_count++;
+        gdpy->last_capture_ms = now_ms;
+        gvt_stream_external_send_frame(gdpy, dmabuf, now_ms);
+        return;
+    }
+
     if (!dmabuf) {
         if (gdpy->cached_surface) {
             gdpy->capture_count++;
@@ -2361,7 +2741,7 @@ static void gvt_stream_scanout_disable(DisplayChangeListener *dcl)
     bool active = gdpy->encode_file || (gdpy->rtp_host && gdpy->rtp_port);
 
     gdpy->scanout_disable_count++;
-    if (gdpy->scanout) {
+    if (gdpy->scanout && (!gdpy->external || gdpy->external_cpu_cache)) {
         gvt_stream_cache_scanout_frame(gdpy, gdpy->scanout, now_ms,
                                        "scanout-disable");
     }
@@ -2370,7 +2750,10 @@ static void gvt_stream_scanout_disable(DisplayChangeListener *dcl)
     egl_fb_destroy(&gdpy->guest_fb);
     egl_fb_destroy(&gdpy->capture_fb);
     g_clear_pointer(&gdpy->capture_surface, qemu_free_displaysurface);
-    if (active && gdpy->cached_surface) {
+    if (active && gdpy->external) {
+        gvt_stream_external_send_no_scanout(gdpy, now_ms);
+        gvt_stream_startup_pump_arm(gdpy, now_ms);
+    } else if (active && gdpy->cached_surface) {
         gvt_stream_encoder_push_cached(gdpy, now_ms, "scanout-disable");
         gvt_stream_startup_pump_arm(gdpy, now_ms);
     }
@@ -2413,7 +2796,8 @@ static void gvt_stream_scanout_dmabuf(DisplayChangeListener *dcl,
     if (gdpy->verbose || gdpy->scanout_count <= 8) {
         gvt_stream_log_dmabuf(gdpy, "scanout-dmabuf", dmabuf);
     }
-    if (!gdpy->cached_surface && dmabuf) {
+    if (!gdpy->cached_surface && dmabuf &&
+        (!gdpy->external || gdpy->external_cpu_cache)) {
         if (gvt_stream_cache_scanout_frame(gdpy, dmabuf, now_ms,
                                            "first-scanout")) {
             gdpy->cache_refresh_count++;
@@ -2534,6 +2918,11 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      " scanout_disable=%" PRIu64 " scanout_lost=%d "
                      " encoded=%" PRIu64 " encode_failures=%" PRIu64
                      " dmabuf=%" PRIu64 " cpu=%" PRIu64
+                     " external=%d external_sent=%" PRIu64
+                     " external_no_scanout=%" PRIu64
+                     " external_send_failures=%" PRIu64
+                     " streamd_encoded=%" PRIu64
+                     " streamd_failures=%" PRIu64
                      " bitrate=%d target_bitrate=%d capture_ms=%" PRIu64
                      " probe_diff_ppm=%" PRIu64 " probes=%" PRIu64
                      " idle_wakes=%" PRIu64 " wake_pulses=%" PRIu64
@@ -2550,6 +2939,11 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      gdpy->scanout_disable_count, gdpy->scanout_lost,
                      gdpy->encode_count, gdpy->encode_fail_count,
                      gdpy->encode_dmabuf_count, gdpy->encode_cpu_count,
+                     gdpy->external, gdpy->external_frame_count,
+                     gdpy->external_no_scanout_count,
+                     gdpy->external_send_fail_count,
+                     gdpy->external_encoded,
+                     gdpy->external_encode_failures,
                      gdpy->encode_current_bitrate,
                      gvt_stream_effective_bitrate(gdpy, now_ms),
                      gvt_stream_effective_capture_ms(gdpy, now_ms),
@@ -2647,12 +3041,23 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy = g_new0(GVTStreamDisplay, 1);
         gdpy->dcl.con = con;
         gdpy->dcl.ops = &gvt_stream_ops;
+        gdpy->external_fd = -1;
         gdpy->refresh_ms = gvt_stream_getenv_u64("GVT_STREAM_REFRESH_MS",
                                                  17, 1, 1000);
         gdpy->report_ms = gvt_stream_getenv_u64("GVT_STREAM_REPORT_MS",
                                                 1000, 100, 60000);
         gdpy->verbose = gvt_stream_getenv_bool("GVT_STREAM_VERBOSE", false);
         gdpy->import_test = gvt_stream_getenv_bool("GVT_STREAM_IMPORT_TEST", false);
+        gdpy->external = gvt_stream_getenv_bool("GVT_STREAM_EXTERNAL", false);
+        gdpy->external_cpu_cache =
+            gvt_stream_getenv_bool("GVT_STREAM_EXTERNAL_CPU_CACHE", false);
+        if (gdpy->external) {
+            const char *socket_path = g_getenv("GVT_STREAMD_SOCKET");
+
+            gdpy->external_socket =
+                g_strdup((socket_path && *socket_path) ? socket_path :
+                         "/tmp/gvt-streamd.sock");
+        }
         gdpy->capture_dir = g_strdup(g_getenv("GVT_STREAM_CAPTURE_DIR"));
         if (gdpy->capture_dir && !*gdpy->capture_dir) {
             g_clear_pointer(&gdpy->capture_dir, g_free);
@@ -2662,6 +3067,9 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->cache_refresh_ms =
             gvt_stream_getenv_u64("GVT_STREAM_CACHE_REFRESH_MS",
                                   0, 0, 60000);
+        if (gdpy->external && !gdpy->external_cpu_cache) {
+            gdpy->cache_refresh_ms = 0;
+        }
         gdpy->idle_capture_ms =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_CAPTURE_MS",
                                   gdpy->capture_ms, 16, 60000);
@@ -2695,6 +3103,11 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         }
         gdpy->encode_file = g_strdup(g_getenv("GVT_STREAM_ENCODE_FILE"));
         if (gdpy->encode_file && !*gdpy->encode_file) {
+            g_clear_pointer(&gdpy->encode_file, g_free);
+        }
+        if (gdpy->external && gdpy->encode_file) {
+            warn_report("gvt-stream-external: ignoring GVT_STREAM_ENCODE_FILE "
+                        "in external mode");
             g_clear_pointer(&gdpy->encode_file, g_free);
         }
         gdpy->encode_max = gvt_stream_getenv_u64("GVT_STREAM_ENCODE_MAX",
@@ -2755,6 +3168,11 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
             const char *path = g_getenv("GVT_STREAM_ENCODE_PATH");
             gdpy->encode_dmabuf = !path || !g_ascii_strcasecmp(path, "dmabuf");
         }
+        if (gdpy->external && !gdpy->encode_dmabuf) {
+            warn_report("gvt-stream-external: CPU IPC is not supported in v1; "
+                        "forcing dmabuf path");
+            gdpy->encode_dmabuf = true;
+        }
         gdpy->rtp_host = g_strdup(g_getenv("GVT_STREAM_RTP_HOST"));
         if (gdpy->rtp_host && !*gdpy->rtp_host) {
             g_clear_pointer(&gdpy->rtp_host, g_free);
@@ -2811,6 +3229,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      " idle_changed_ppm=%" PRIu64 " idle_pixel_delta=%" PRIu64
                      " capture_max=%" PRIu64 " startup_pump_ms=%" PRIu64
                      " startup_pump_interval_ms=%" PRIu64
+                     " external=%d external_socket=%s external_cpu_cache=%d"
                      " encode_file=%s encode_max=%" PRIu64 " encode_fps=%d codec=%s "
                      "rate_control=%s bitrate=%d idle_bitrate=%d still_bitrate=%d "
                      "path=%s flip=%d dmabuf_caps=%d rtp=%s:%u mtu=%d",
@@ -2823,6 +3242,8 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      gdpy->idle_probe_ms, gdpy->idle_changed_ppm,
                      gdpy->idle_pixel_delta, gdpy->capture_max,
                      gdpy->startup_pump_ms, gdpy->startup_pump_interval_ms,
+                     gdpy->external, gdpy->external_socket ?: "",
+                     gdpy->external_cpu_cache,
                      gdpy->encode_file ?: "",
                      gdpy->encode_max, gdpy->encode_fps, gdpy->video_codec,
                      gdpy->encode_rate_control, gdpy->encode_bitrate,

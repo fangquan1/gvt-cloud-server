@@ -5,6 +5,8 @@ Minimal server-side patch set for the GVT-g cloud desktop project.
 This repository keeps the host/QEMU display path plus a minimal systemd runner:
 
 - `src/qemu/gvt-stream.c`: the current QEMU `gvt-stream` display backend.
+- `src/qemu/gvt-stream-ipc.h`: v1 QEMU-to-streamd IPC message format.
+- `src/gvt-streamd/gvt-streamd.c`: experimental standalone DMABUF encoder.
 - `patches/qemu-gvt-stream.patch`: the patch to apply to a QEMU source tree.
 - `SERVER.md`: build, run, verification, and troubleshooting notes.
 - `deploy/systemd/gvt-qemu@.service`: optional systemd unit for QEMU VMs.
@@ -24,5 +26,8 @@ Current baseline:
 - Client disconnect stops encoding.
 - Guest display sleep/no-scanout reconnect is handled by cached frame fallback
   plus wakeup and automatic return to DMABUF encoding.
+- On `current-detach`, `GVT_STREAM_EXTERNAL=1` enables an experimental
+  `gvt-streamd` process that receives scanout DMABUF fds from QEMU and performs
+  RTP encoding outside the QEMU process. The default remains the in-QEMU path.
 
 Start with [SERVER.md](SERVER.md).
