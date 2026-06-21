@@ -83,6 +83,7 @@ typedef struct GVTStreamDisplay {
     bool idle_sample_valid;
     uint32_t idle_sample[GVT_STREAM_IDLE_SAMPLE_N];
     bool low_bandwidth;
+    bool low_bandwidth_roi;
     bool dirty_valid;
     bool dirty_prev_valid;
     uint8_t *dirty_prev;
@@ -110,6 +111,7 @@ typedef struct GVTStreamDisplay {
     uint64_t dirty_full_count;
     uint64_t dirty_global_count;
     uint64_t dirty_skip_count;
+    uint64_t dirty_roi_count;
     int dirty_target_bitrate;
     int encode_fps;
     int encode_bitrate;
@@ -142,6 +144,8 @@ typedef struct GVTStreamDisplay {
     uint64_t external_stats_count;
     uint64_t external_encoded;
     uint64_t external_encode_failures;
+    uint64_t external_encoded_bytes;
+    uint64_t external_roi_frames;
 } GVTStreamDisplay;
 
 typedef struct GVTStreamInputServer GVTStreamInputServer;
@@ -379,12 +383,17 @@ static void gvt_stream_external_read(void *opaque)
                 gdpy->external_stats_count++;
                 gdpy->external_encoded = msg.encoded;
                 gdpy->external_encode_failures = msg.encode_failures;
+                gdpy->external_encoded_bytes = msg.encoded_bytes;
+                gdpy->external_roi_frames = msg.roi_frames;
                 if (gdpy->verbose || gdpy->external_stats_count <= 5 ||
                     gdpy->external_stats_count % 60 == 0) {
                     error_report("gvt-stream-external: stats #%" PRIu64
-                                 " encoded=%" PRIu64 " failures=%" PRIu64,
+                                 " encoded=%" PRIu64 " bytes=%" PRIu64
+                                 " roi=%" PRIu64 " failures=%" PRIu64,
                                  gdpy->external_stats_count,
                                  gdpy->external_encoded,
+                                 gdpy->external_encoded_bytes,
+                                 gdpy->external_roi_frames,
                                  gdpy->external_encode_failures);
                 }
             }
@@ -472,6 +481,9 @@ static void gvt_stream_external_fill_common(GVTStreamDisplay *gdpy,
     msg->fps = gdpy->encode_fps;
     if (gdpy->low_bandwidth) {
         msg->flags |= GVT_STREAM_IPC_FLAG_LOW_BANDWIDTH;
+    }
+    if (gdpy->low_bandwidth_roi) {
+        msg->flags |= GVT_STREAM_IPC_FLAG_ENCODE_ROI;
     }
     msg->bitrate = gdpy->encode_bitrate;
     msg->idle_bitrate = gdpy->encode_idle_bitrate;
@@ -678,6 +690,10 @@ static bool gvt_stream_external_send_frame(GVTStreamDisplay *gdpy,
         } else if (gdpy->dirty_mode == GVT_STREAM_DIRTY_GLOBAL) {
             msg.flags |= GVT_STREAM_IPC_FLAG_DIRTY_GLOBAL;
         }
+        if (gdpy->low_bandwidth_roi &&
+            gdpy->dirty_mode == GVT_STREAM_DIRTY_PARTIAL) {
+            gdpy->dirty_roi_count++;
+        }
     }
 
     ok = gvt_stream_external_send_message(gdpy, &msg, fds[0]);
@@ -688,12 +704,15 @@ static bool gvt_stream_external_send_frame(GVTStreamDisplay *gdpy,
             error_report("gvt-stream-external: frame-sent #%" PRIu64
                          " seq=%" PRIu64 " fd=%d size=%ux%u stride=%u "
                          "modifier=0x%016" PRIx64
-                         " dirty=%s rect=%u,%u %ux%u ppm=%u target_bitrate=%d",
+                         " dirty=%s rect=%u,%u %ux%u ppm=%u roi=%d "
+                         "target_bitrate=%d",
                          gdpy->external_frame_count, msg.seq, fds[0],
                          msg.width, msg.height, msg.stride, msg.modifier,
                          gvt_stream_dirty_mode_name(msg.dirty_mode),
                          msg.dirty_x, msg.dirty_y, msg.dirty_w, msg.dirty_h,
-                         msg.dirty_ppm, gdpy->dirty_target_bitrate);
+                         msg.dirty_ppm,
+                         !!(msg.flags & GVT_STREAM_IPC_FLAG_ENCODE_ROI),
+                         gdpy->dirty_target_bitrate);
         }
     }
     return ok;
@@ -2579,12 +2598,15 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      " external_no_scanout=%" PRIu64
                      " external_send_failures=%" PRIu64
                      " streamd_encoded=%" PRIu64
+                     " streamd_bytes=%" PRIu64
+                     " streamd_roi=%" PRIu64
                      " streamd_failures=%" PRIu64
                      " bitrate=%d target_bitrate=%d capture_ms=%" PRIu64
                      " dirty=%s dirty_rect=%u,%u %ux%u dirty_ppm=%" PRIu64
                      " dirty_frames=%" PRIu64 " dirty_static=%" PRIu64
                      " dirty_partial=%" PRIu64 " dirty_full=%" PRIu64
                      " dirty_global=%" PRIu64 " dirty_skipped=%" PRIu64
+                     " dirty_roi=%" PRIu64
                      " probe_diff_ppm=%" PRIu64 " probes=%" PRIu64
                      " idle_wakes=%" PRIu64 " wake_pulses=%" PRIu64
                      " input_msgs=%" PRIu64 " input_events=%" PRIu64
@@ -2602,6 +2624,8 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      gdpy->external_no_scanout_count,
                      gdpy->external_send_fail_count,
                      gdpy->external_encoded,
+                     gdpy->external_encoded_bytes,
+                     gdpy->external_roi_frames,
                      gdpy->external_encode_failures,
                      gdpy->encode_bitrate,
                      gdpy->dirty_target_bitrate,
@@ -2613,6 +2637,7 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      gdpy->dirty_static_count, gdpy->dirty_partial_count,
                      gdpy->dirty_full_count, gdpy->dirty_global_count,
                      gdpy->dirty_skip_count,
+                     gdpy->dirty_roi_count,
                       gdpy->last_probe_diff_ppm, gdpy->idle_probe_count,
                       gdpy->idle_wake_count, gdpy->wakeup_pulse_count,
                       gvt_stream_input_server ?
@@ -2716,6 +2741,8 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->import_test = gvt_stream_getenv_bool("GVT_STREAM_IMPORT_TEST", false);
         gdpy->low_bandwidth =
             gvt_stream_getenv_bool("GVT_STREAM_LOW_BANDWIDTH", false);
+        gdpy->low_bandwidth_roi =
+            gvt_stream_getenv_bool("GVT_STREAM_LOW_BANDWIDTH_ROI", false);
         {
             const char *socket_path = g_getenv("GVT_STREAMD_SOCKET");
 
@@ -2871,7 +2898,8 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
 
         error_report("gvt-stream: listener console=%d refresh_ms=%" PRIu64
                      " report_ms=%" PRIu64 " verbose=%d import_test=%d "
-                     "low_bandwidth=%d dirty_block=%u dirty_delta=%" PRIu64
+                     "low_bandwidth=%d low_bandwidth_roi=%d "
+                     "dirty_block=%u dirty_delta=%" PRIu64
                      " dirty_partial_ppm=%" PRIu64 " dirty_global_ppm=%" PRIu64
                      " dirty_global_burst=%" PRIu64 " "
                      "capture_dir=%s capture_ms=%" PRIu64 " idle_capture_ms=%" PRIu64
@@ -2885,7 +2913,8 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      "rtp=%s:%u mtu=%d",
                      qemu_console_get_index(con), gdpy->refresh_ms,
                      gdpy->report_ms, gdpy->verbose, gdpy->import_test,
-                     gdpy->low_bandwidth, gdpy->dirty_block_size,
+                     gdpy->low_bandwidth, gdpy->low_bandwidth_roi,
+                     gdpy->dirty_block_size,
                      gdpy->dirty_pixel_delta,
                      gdpy->dirty_partial_max_ppm,
                      gdpy->dirty_global_min_ppm,

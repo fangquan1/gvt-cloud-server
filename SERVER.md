@@ -331,6 +331,9 @@ Experimental low-bandwidth knobs:
 
 - `GVT_STREAM_LOW_BANDWIDTH=1` enables per-frame EGL readback and dirty-region
   classification in QEMU.
+- `GVT_STREAM_LOW_BANDWIDTH_ROI=1` makes `gvt-streamd` encode only the dirty
+  rectangle for partial frames. This produces a small H.265 picture and requires
+  a client compositor; leave it disabled for the current plain RTP viewer.
 - `GVT_STREAM_DIRTY_BLOCK_SIZE=16` controls the diff grid size.
 - `GVT_STREAM_DIRTY_PIXEL_DELTA=8` is the per-channel noise threshold.
 - `GVT_STREAM_DIRTY_PARTIAL_MAX_PPM=150000` marks small changes as partial
@@ -343,11 +346,15 @@ Experimental low-bandwidth knobs:
   small-dirty-region bitrate. If unset, QEMU uses about 35% of the requested
   bitrate when low-bandwidth mode is enabled.
 
-Current low-bandwidth behavior is compatible with the existing RTP viewer:
-static frames are not re-submitted after the first full frame, partial
-candidates are still encoded as full-size H.265 pictures at reduced VAAPI
-bitrate, and global changes switch back to full bitrate immediately. A true ROI
-substream still requires a client-side background cache/compositor protocol.
+With `GVT_STREAM_LOW_BANDWIDTH_ROI=0`, low-bandwidth behavior is compatible with
+the existing RTP viewer: static frames are not re-submitted after the first full
+frame, partial candidates are encoded as full-size H.265 pictures at reduced
+VAAPI bitrate, and global changes switch back to full bitrate immediately.
+With `GVT_STREAM_LOW_BANDWIDTH_ROI=1`, partial candidates are encoded as
+dirty-rectangle-sized H.265 pictures by pointing `GstVideoMeta` at the subregion
+inside the source DMABUF. That is the server-side ROI encoder path; it still
+needs a client-side background cache/compositor before it can be used as the
+normal viewer path.
 
 When the client disconnects, the active control connection closes and QEMU
 asks `gvt-streamd` to stop encoding. When the guest display sleeps or scanout

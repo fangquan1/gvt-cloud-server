@@ -28,17 +28,19 @@ damage 分类与编码策略基础，不伪造客户端无法理解的局部 RTP
   - 大变化标记 global，并用 `GVT_STREAM_DIRTY_GLOBAL_BURST_FRAMES=2` 保持全局模式。
 - `gvt-streamd` 消费 dirty metadata：
   - partial candidate 时把 VAAPI encoder bitrate 调到 still bitrate。
+  - `GVT_STREAM_LOW_BANDWIDTH_ROI=1` 时，partial candidate 只把 dirty rect
+    作为 `GstVideoMeta` 编码窗口送入 VAAPI encoder。
   - full/global 时立即切回基准 bitrate。
-  - 增加 dirty 分类、bitrate-change 和静态跳帧观测日志。
-- `gvt-qm-run` 和示例配置暴露低带宽实验参数。
+  - 增加 dirty 分类、bitrate-change、RTP bytes、ROI frame 和静态跳帧观测日志。
+- `gvt-qm-run` 和示例配置暴露低带宽及 ROI 实验参数。
 - `patches/qemu-gvt-stream.patch` 已同步更新。
 
 ## 当前边界
 
-本轮还没有实现真正的 ROI 子流和客户端背景缓存合成。partial candidate 仍通过完整
-H.265 picture 兼容现有 RTP viewer，只是在服务端已具备脏区判断和降码率策略。真正
-“只编码并传输变动区域”还需要新增客户端合成协议或替换当前直接 D3D11 sink 的解码显示
-路径。
+服务端已经具备 opt-in ROI 编码路径：开启 `GVT_STREAM_LOW_BANDWIDTH_ROI=1`
+后，partial candidate 会编码成 dirty-rectangle-sized H.265 picture。当前普通
+viewer 仍然是直接 D3D11 sink，没有背景缓存/合成层，因此默认保持
+`LOW_BANDWIDTH_ROI=0`；真正作为用户可用路径还需要新增客户端 compositor。
 
 ## 验证
 
@@ -64,6 +66,9 @@ ssh root@192.168.0.188 "chmod +x /tmp/gvt-lowbw-build/scripts/build-gvt-streamd 
 - `gvt-streamd-lowbw` 编译通过，输出 `/tmp/gvt-lowbw-build/gvt-streamd-lowbw`。
 - 使用远端 QEMU `compile_commands.json` 的真实编译参数，`gvt-stream.c` 编译到
   `/tmp/gvt-lowbw-build/gvt-stream.o` 通过。
+- ROI 版 streamd 临时编译通过，输出 `/tmp/gvt-roi-build/gvt-streamd-roi`。
+- ROI 版 QEMU `gvt-stream.c` 使用远端真实编译参数编译到
+  `/tmp/gvt-roi-build/gvt-stream.o` 通过。
 - `gst-inspect-1.0 vaapih265enc` 确认 `bitrate`、`keyframe-period` 和
   `rate-control` 属性存在且可写。
 
@@ -72,6 +77,7 @@ ssh root@192.168.0.188 "chmod +x /tmp/gvt-lowbw-build/scripts/build-gvt-streamd 
 - 未替换远端正在运行的 QEMU/source tree。
 - 未重启 VM。
 - 未做秒表小区域带宽实测和全屏切换实测。
+- 未实现客户端背景缓存/局部帧合成。
 
 ## Commit
 
@@ -81,4 +87,5 @@ ssh root@192.168.0.188 "chmod +x /tmp/gvt-lowbw-build/scripts/build-gvt-streamd 
 
 - 在远端可中断窗口部署 `LOW_BANDWIDTH=1`，跑秒表/静态桌面/小窗口切全屏三组带宽对比。
 - 根据日志中的 `dirty=partial|global|static` 和 `dirty_ppm` 调整阈值。
-- 设计 ROI 子流和客户端背景缓存合成协议，避免 partial candidate 仍走完整 picture。
+- 在客户端增加背景缓存和 ROI H.265 小帧合成路径，使
+  `LOW_BANDWIDTH_ROI=1` 可以作为正常观看路径使用。

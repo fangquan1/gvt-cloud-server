@@ -37,6 +37,10 @@ IDLE_PROBE_MS=0
 # dirty-region classification, skips static frames, and lets streamd lower the
 # VAAPI encoder bitrate for small dirty regions. Leave disabled for baseline.
 LOW_BANDWIDTH=0
+# ROI mode encodes only the dirty rect for partial frames. It requires a
+# client-side compositor and will not render correctly in the current plain RTP
+# viewer, so keep disabled unless testing the ROI path directly.
+LOW_BANDWIDTH_ROI=0
 DIRTY_BLOCK_SIZE=16
 DIRTY_PIXEL_DELTA=8
 DIRTY_PARTIAL_MAX_PPM=150000

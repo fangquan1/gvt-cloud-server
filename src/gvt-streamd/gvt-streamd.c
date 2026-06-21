@@ -49,6 +49,7 @@ typedef struct GVTStreamd {
     uint32_t rtp_port;
     uint32_t rtp_fec;
     uint32_t rtp_fec_important;
+    bool roi_enabled;
     char host[GVT_STREAM_IPC_HOST_MAX];
     char codec[GVT_STREAM_IPC_CODEC_MAX];
     char rate_control[GVT_STREAM_IPC_RATE_CONTROL_MAX];
@@ -56,6 +57,7 @@ typedef struct GVTStreamd {
     GstElement *pipeline;
     GstElement *appsrc;
     GstElement *encoder;
+    GstElement *rtpstats;
     GstAllocator *dmabuf_allocator;
     GstClockTime pts;
     GstClockTime duration;
@@ -79,7 +81,17 @@ typedef struct GVTStreamd {
     uint64_t dirty_full_frames;
     uint64_t dirty_global_frames;
     uint64_t bitrate_changes;
+    uint64_t rtp_bytes;
+    uint64_t roi_frames;
 } GVTStreamd;
+
+typedef struct StreamdFrameRect {
+    uint32_t x;
+    uint32_t y;
+    uint32_t w;
+    uint32_t h;
+    bool roi;
+} StreamdFrameRect;
 
 static volatile sig_atomic_t stop_requested;
 
@@ -156,6 +168,8 @@ static void streamd_send_stats(GVTStreamd *s)
     msg.size = sizeof(msg);
     msg.encoded = s->frames;
     msg.encode_failures = s->failures;
+    msg.encoded_bytes = s->rtp_bytes;
+    msg.roi_frames = s->roi_frames;
 
     memset(&iov, 0, sizeof(iov));
     iov.iov_base = &msg;
@@ -215,6 +229,19 @@ static void streamd_poll_bus(GVTStreamd *s)
     gst_object_unref(bus);
 }
 
+static void streamd_rtp_handoff(GstElement *identity,
+                                GstBuffer *buffer,
+                                gpointer data)
+{
+    GVTStreamd *s = data;
+
+    (void)identity;
+    if (!s || !buffer) {
+        return;
+    }
+    s->rtp_bytes += gst_buffer_get_size(buffer);
+}
+
 static void streamd_encoder_finish(GVTStreamd *s)
 {
     GstBus *bus;
@@ -253,12 +280,16 @@ static void streamd_encoder_finish(GVTStreamd *s)
 
     gst_object_unref(bus);
     gst_element_set_state(s->pipeline, GST_STATE_NULL);
+    if (s->rtpstats) {
+        gst_object_unref(s->rtpstats);
+    }
     if (s->encoder) {
         gst_object_unref(s->encoder);
     }
     gst_object_unref(s->appsrc);
     gst_object_unref(s->pipeline);
     s->encoder = NULL;
+    s->rtpstats = NULL;
     s->appsrc = NULL;
     s->pipeline = NULL;
     s->pipeline_width = 0;
@@ -309,6 +340,7 @@ static bool streamd_encoder_start(GVTStreamd *s, uint32_t width,
             "! %s config-interval=1 "
             "! %s pt=96 ssrc=2222 config-interval=1 mtu=%u "
             "! rtpulpfecenc pt=122 percentage=%u percentage-important=%u multipacket=true "
+            "! identity name=rtpstats signal-handoffs=true silent=true "
             "! udpsink host=%s port=%u sync=false async=false",
             encoder, streamd_rate_control(s), s->bitrate, s->keyint,
             encoder_opts, parser, payloader, s->mtu,
@@ -323,6 +355,7 @@ static bool streamd_encoder_start(GVTStreamd *s, uint32_t width,
             "%s"
             "! %s config-interval=1 "
             "! %s pt=96 ssrc=2222 config-interval=1 mtu=%u "
+            "! identity name=rtpstats signal-handoffs=true silent=true "
             "! udpsink host=%s port=%u sync=false async=false",
             encoder, streamd_rate_control(s), s->bitrate, s->keyint,
             encoder_opts, parser, payloader, s->mtu, s->host, s->rtp_port);
@@ -352,6 +385,13 @@ static bool streamd_encoder_start(GVTStreamd *s, uint32_t width,
     if (!s->encoder) {
         g_printerr("gvt-streamd: encode-encoder-not-found adaptive bitrate disabled\n");
     }
+    s->rtpstats = gst_bin_get_by_name(GST_BIN(s->pipeline), "rtpstats");
+    if (s->rtpstats) {
+        g_signal_connect(s->rtpstats, "handoff",
+                         G_CALLBACK(streamd_rtp_handoff), s);
+    } else {
+        g_printerr("gvt-streamd: rtpstats-not-found byte stats disabled\n");
+    }
 
     caps = gst_caps_new_simple("video/x-raw",
                                "format", G_TYPE_STRING, "BGRx",
@@ -375,9 +415,13 @@ static bool streamd_encoder_start(GVTStreamd *s, uint32_t width,
         if (s->encoder) {
             gst_object_unref(s->encoder);
         }
+        if (s->rtpstats) {
+            gst_object_unref(s->rtpstats);
+        }
         gst_object_unref(s->appsrc);
         gst_object_unref(s->pipeline);
         s->encoder = NULL;
+        s->rtpstats = NULL;
         s->appsrc = NULL;
         s->pipeline = NULL;
         return false;
@@ -388,11 +432,12 @@ static bool streamd_encoder_start(GVTStreamd *s, uint32_t width,
     s->current_bitrate = s->bitrate;
     g_printerr("gvt-streamd: encode-start codec=%s rtp=%s:%u size=%ux%u "
                "fps=%u rate_control=%s bitrate=%u keyint=%u mtu=%u fec=%u/%u "
-               "dmabuf_caps=%d\n",
+               "dmabuf_caps=%d roi=%d\n",
                streamd_codec(s), s->host, s->rtp_port, width, height,
                s->fps, streamd_rate_control(s), s->bitrate, s->keyint,
                s->mtu, s->rtp_fec, s->rtp_fec_important,
-               !!(s->flags & GVT_STREAM_IPC_FLAG_DMABUF_CAPS_FEATURE));
+               !!(s->flags & GVT_STREAM_IPC_FLAG_DMABUF_CAPS_FEATURE),
+               s->roi_enabled);
     return true;
 }
 
@@ -513,6 +558,85 @@ static void streamd_cache_last_frame(GVTStreamd *s,
     s->last_meta = *msg;
 }
 
+static StreamdFrameRect streamd_select_frame_rect(GVTStreamd *s,
+                                                  const GVTStreamIpcMessage *msg)
+{
+    StreamdFrameRect rect;
+    uint32_t right;
+    uint32_t bottom;
+
+    rect.x = 0;
+    rect.y = 0;
+    rect.w = msg ? msg->width : 0;
+    rect.h = msg ? msg->height : 0;
+    rect.roi = false;
+
+    if (!s || !msg || !s->roi_enabled ||
+        !(msg->flags & GVT_STREAM_IPC_FLAG_DIRTY_VALID) ||
+        msg->dirty_mode != GVT_STREAM_DIRTY_PARTIAL ||
+        !msg->dirty_w || !msg->dirty_h ||
+        msg->dirty_x >= msg->width || msg->dirty_y >= msg->height) {
+        return rect;
+    }
+
+    rect.x = msg->dirty_x;
+    rect.y = msg->dirty_y;
+    right = MIN(msg->width, msg->dirty_x + msg->dirty_w);
+    bottom = MIN(msg->height, msg->dirty_y + msg->dirty_h);
+    if (right <= rect.x || bottom <= rect.y) {
+        rect.x = 0;
+        rect.y = 0;
+        return rect;
+    }
+
+    rect.w = right - rect.x;
+    rect.h = bottom - rect.y;
+
+    if (rect.x & 1) {
+        rect.x--;
+        rect.w++;
+    }
+    if (rect.y & 1) {
+        rect.y--;
+        rect.h++;
+    }
+    if (rect.w & 1) {
+        if (rect.x + rect.w < msg->width) {
+            rect.w++;
+        } else {
+            rect.w--;
+        }
+    }
+    if (rect.h & 1) {
+        if (rect.y + rect.h < msg->height) {
+            rect.h++;
+        } else {
+            rect.h--;
+        }
+    }
+
+    if (rect.w < 16 && rect.x + 16 <= msg->width) {
+        rect.w = 16;
+    }
+    if (rect.h < 16 && rect.y + 16 <= msg->height) {
+        rect.h = 16;
+    }
+
+    if (!rect.w || !rect.h ||
+        rect.x + rect.w > msg->width ||
+        rect.y + rect.h > msg->height) {
+        rect.x = 0;
+        rect.y = 0;
+        rect.w = msg->width;
+        rect.h = msg->height;
+        rect.roi = false;
+        return rect;
+    }
+
+    rect.roi = rect.w < msg->width || rect.h < msg->height;
+    return rect;
+}
+
 static bool streamd_push_dmabuf(GVTStreamd *s,
                                 const GVTStreamIpcMessage *msg,
                                 int fd,
@@ -523,6 +647,7 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
     GstFlowReturn flow;
     gsize plane_offsets[GST_VIDEO_MAX_PLANES] = { 0 };
     gint plane_strides[GST_VIDEO_MAX_PLANES] = { 0 };
+    StreamdFrameRect rect;
     size_t size;
 
     if (!msg || !msg->width || !msg->height ||
@@ -563,7 +688,8 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
         streamd_cache_last_frame(s, msg, fd);
     }
 
-    if (!streamd_encoder_start(s, msg->width, msg->height)) {
+    rect = streamd_select_frame_rect(s, msg);
+    if (!streamd_encoder_start(s, rect.w, rect.h)) {
         close(fd);
         return false;
     }
@@ -590,11 +716,12 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
 
     buf = gst_buffer_new();
     gst_buffer_append_memory(buf, mem);
-    plane_offsets[0] = msg->offset;
+    plane_offsets[0] = (gsize)msg->offset +
+        (gsize)rect.y * msg->stride + (gsize)rect.x * 4;
     plane_strides[0] = msg->stride;
     gst_buffer_add_video_meta_full(buf, GST_VIDEO_FRAME_FLAG_NONE,
                                    GST_VIDEO_FORMAT_BGRx,
-                                   msg->width, msg->height, 1,
+                                   rect.w, rect.h, 1,
                                    plane_offsets, plane_strides);
     streamd_stamp_buffer(s, buf);
 
@@ -608,19 +735,25 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
     }
 
     s->frames++;
+    if (rect.roi) {
+        s->roi_frames++;
+    }
     if (!g_strcmp0(source, "cached")) {
         s->cached_frames++;
     }
     if (s->frames <= 5 || s->frames % 60 == 0) {
         g_printerr("gvt-streamd: dmabuf-push-ok #=%" PRIu64
                    " source=%s size=%ux%u stride=%u cached=%" PRIu64
+                   " encode_rect=%u,%u %ux%u roi=%d "
                    " dirty=%s rect=%u,%u %ux%u ppm=%u bitrate=%u "
-                   "failures=%" PRIu64 "\n",
+                   "rtp_bytes=%" PRIu64 " failures=%" PRIu64 "\n",
                    s->frames, source ?: "live", msg->width, msg->height,
                    msg->stride, s->cached_frames,
+                   rect.x, rect.y, rect.w, rect.h, rect.roi,
                    streamd_dirty_mode_name(msg->dirty_mode),
                    msg->dirty_x, msg->dirty_y, msg->dirty_w, msg->dirty_h,
-                   msg->dirty_ppm, s->current_bitrate, s->failures);
+                   msg->dirty_ppm, s->current_bitrate, s->rtp_bytes,
+                   s->failures);
         streamd_send_stats(s);
     }
     return true;
@@ -631,6 +764,7 @@ static void streamd_apply_start(GVTStreamd *s, const GVTStreamIpcMessage *msg)
     s->starts++;
     s->started = true;
     s->flags = msg->flags;
+    s->roi_enabled = !!(msg->flags & GVT_STREAM_IPC_FLAG_ENCODE_ROI);
     s->fps = msg->fps ?: 59;
     s->bitrate = msg->bitrate ?: 18000;
     s->idle_bitrate = msg->idle_bitrate;
@@ -653,10 +787,10 @@ static void streamd_apply_start(GVTStreamd *s, const GVTStreamIpcMessage *msg)
     streamd_encoder_finish(s);
     g_printerr("gvt-streamd: start #%" PRIu64 " target=%s:%u codec=%s "
                "fps=%u bitrate=%u still_bitrate=%u keyint=%u mtu=%u "
-               "fec=%u/%u flags=0x%x\n",
+               "fec=%u/%u flags=0x%x roi=%d\n",
                s->starts, s->host, s->rtp_port, s->codec, s->fps,
                s->bitrate, s->still_bitrate, s->keyint, s->mtu, s->rtp_fec,
-               s->rtp_fec_important, s->flags);
+               s->rtp_fec_important, s->flags, s->roi_enabled);
 }
 
 static void streamd_apply_stop(GVTStreamd *s)
@@ -668,12 +802,13 @@ static void streamd_apply_stop(GVTStreamd *s)
     g_printerr("gvt-streamd: stop #%" PRIu64 " frames=%" PRIu64
                " cached=%" PRIu64 " dirty_static=%" PRIu64
                " dirty_partial=%" PRIu64 " dirty_full=%" PRIu64
-               " dirty_global=%" PRIu64 " bitrate_changes=%" PRIu64
+               " dirty_global=%" PRIu64 " roi_frames=%" PRIu64
+               " rtp_bytes=%" PRIu64 " bitrate_changes=%" PRIu64
                " failures=%" PRIu64 "\n",
                s->stops, s->frames, s->cached_frames,
                s->dirty_static_frames, s->dirty_partial_frames,
                s->dirty_full_frames, s->dirty_global_frames,
-               s->bitrate_changes, s->failures);
+               s->roi_frames, s->rtp_bytes, s->bitrate_changes, s->failures);
 }
 
 static void streamd_apply_no_scanout(GVTStreamd *s,

@@ -1,8 +1,8 @@
 /*
  * GVT stream external encoder IPC protocol.
  *
- * v2 is intentionally narrow: one XR24/BGRx DMABUF plane per FRAME message,
- * optional dirty-region metadata, and one SCM_RIGHTS fd over AF_UNIX
+ * v3 is intentionally narrow: one XR24/BGRx DMABUF plane per FRAME message,
+ * optional dirty-region/ROI metadata, and one SCM_RIGHTS fd over AF_UNIX
  * SOCK_SEQPACKET.
  */
 
@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #define GVT_STREAM_IPC_MAGIC 0x47565344u /* GVSD */
-#define GVT_STREAM_IPC_VERSION 2
+#define GVT_STREAM_IPC_VERSION 3
 
 #define GVT_STREAM_IPC_HOST_MAX 64
 #define GVT_STREAM_IPC_CODEC_MAX 16
@@ -25,6 +25,7 @@
 #define GVT_STREAM_IPC_FLAG_DIRTY_PARTIAL       (1u << 4)
 #define GVT_STREAM_IPC_FLAG_DIRTY_GLOBAL        (1u << 5)
 #define GVT_STREAM_IPC_FLAG_LOW_BANDWIDTH       (1u << 6)
+#define GVT_STREAM_IPC_FLAG_ENCODE_ROI          (1u << 7)
 
 typedef enum GVTStreamIpcType {
     GVT_STREAM_IPC_START = 1,
@@ -81,6 +82,8 @@ typedef struct GVTStreamIpcMessage {
 
     uint64_t encoded;
     uint64_t encode_failures;
+    uint64_t encoded_bytes;
+    uint64_t roi_frames;
 
     char host[GVT_STREAM_IPC_HOST_MAX];
     char codec[GVT_STREAM_IPC_CODEC_MAX];
