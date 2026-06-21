@@ -1,0 +1,32 @@
+﻿[
+    {
+        "role":  "streamd",
+        "samples":  259,
+        "cpu_avg":  5.36,
+        "cpu_p95":  6.7,
+        "cpu_max":  7.64,
+        "rss_avg_mb":  90.8,
+        "rss_max_mb":  96.2,
+        "pss_avg_mb":  85.2,
+        "pss_max_mb":  90.6,
+        "private_dirty_avg_mb":  54,
+        "private_dirty_max_mb":  59.4,
+        "threads_max":  5,
+        "fd_max":  19
+    },
+    {
+        "role":  "qemu",
+        "samples":  259,
+        "cpu_avg":  21.72,
+        "cpu_p95":  98.95,
+        "cpu_max":  309.16,
+        "rss_avg_mb":  4261.8,
+        "rss_max_mb":  4266.7,
+        "pss_avg_mb":  4251.3,
+        "pss_max_mb":  4256.2,
+        "private_dirty_avg_mb":  4147.6,
+        "private_dirty_max_mb":  4152.5,
+        "threads_max":  14,
+        "fd_max":  121
+    }
+]
