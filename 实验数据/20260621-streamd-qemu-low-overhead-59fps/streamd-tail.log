@@ -1,0 +1,123 @@
+gvt-streamd: listening socket=/root/qemu_cmd/win10-gvt-streamd.sock
+gvt-streamd: client connected fd=4
+gvt-streamd: start #1 target=192.168.0.127:5004 codec=h265 fps=59 interval_ns=16949152 bitrate=18000 keyint=59 mtu=1400 fec=0/0 flags=0x0
+gvt-streamd: encode-start codec=h265 rtp=192.168.0.127:5004 size=1920x1200 fps=59 rate_control=cbr bitrate=18000 keyint=59 mtu=1400 fec=0/0 dmabuf_caps=0
+gvt-streamd: dmabuf-push-ok #=1 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=2 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=3 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=4 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=5 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=300 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=600 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=900 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=1200 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=1500 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: encode-eos frames=1701
+gvt-streamd: stop #1 frames=1701 cached=0 dropped=0 failures=0
+gvt-streamd: start #2 target=192.168.0.127:5004 codec=h265 fps=59 interval_ns=16949152 bitrate=18000 keyint=59 mtu=1400 fec=0/0 flags=0x0
+gvt-streamd: encode-start codec=h265 rtp=192.168.0.127:5004 size=1920x1200 fps=59 rate_control=cbr bitrate=18000 keyint=59 mtu=1400 fec=0/0 dmabuf_caps=0
+gvt-streamd: dmabuf-push-ok #=1800 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=2100 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=2400 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=2700 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=3000 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=3300 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=3600 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=3900 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=4200 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=4500 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=4800 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=5100 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=5400 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=5700 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=6000 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=6300 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=6600 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=6900 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=7200 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=7500 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=7800 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=8100 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=8400 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=8700 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=9000 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=9300 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=9600 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=9900 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=10200 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=10500 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=10800 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=11100 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=11400 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=11700 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=12000 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=12300 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=12600 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=12900 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=13200 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=13500 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=13800 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=14100 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: encode-eos frames=14364
+gvt-streamd: stop #2 frames=14364 cached=0 dropped=0 failures=0
+gvt-streamd: start #3 target=192.168.0.127:5004 codec=h265 fps=59 interval_ns=16949152 bitrate=18000 keyint=59 mtu=1400 fec=0/0 flags=0x0
+gvt-streamd: encode-start codec=h265 rtp=192.168.0.127:5004 size=1920x1200 fps=59 rate_control=cbr bitrate=18000 keyint=59 mtu=1400 fec=0/0 dmabuf_caps=0
+gvt-streamd: dmabuf-push-ok #=14400 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=14700 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=15000 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=15300 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=15600 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=15900 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: encode-eos frames=16075
+gvt-streamd: stop #3 frames=16075 cached=0 dropped=0 failures=0
+gvt-streamd: start #4 target=192.168.0.127:5004 codec=h265 fps=59 interval_ns=16949152 bitrate=18000 keyint=59 mtu=1400 fec=0/0 flags=0x0
+gvt-streamd: encode-start codec=h265 rtp=192.168.0.127:5004 size=1920x1200 fps=59 rate_control=cbr bitrate=18000 keyint=59 mtu=1400 fec=0/0 dmabuf_caps=0
+gvt-streamd: dmabuf-push-ok #=16200 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=16500 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=16800 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=17100 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=17400 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=17700 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=18000 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=18300 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=18600 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=18900 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=19200 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=19500 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=19800 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=20100 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=20400 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=20700 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=21000 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=21300 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=21600 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=21900 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=22200 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=22500 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=22800 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=23100 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=23400 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=23700 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=24000 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=24300 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=24600 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=24900 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=25200 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=25500 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=25800 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=26100 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=26400 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=26700 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=27000 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=27300 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=27600 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=27900 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=28200 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=28500 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=28800 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=29100 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=29400 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=29700 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=30000 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=30300 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0
+gvt-streamd: dmabuf-push-ok #=30600 source=live size=1920x1200 stride=7680 cached=0 dropped=0 failures=0

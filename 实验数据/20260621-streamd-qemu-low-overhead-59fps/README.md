@@ -114,7 +114,8 @@
 
 ## Commit
 
-- 待回填
+- `0c170ab Reduce stream pacing overhead`
+- 记录补充提交保存本 README、采样摘要和日志尾段。
 
 ## 结论
 
