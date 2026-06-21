@@ -1,11 +1,11 @@
 [Unit]
-Description=GVT QEMU VM %i
+Description=GVT QEMU VM %I
 After=network-online.target gvt-vgpu-create.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/gvt-qm-run %i
+ExecStart=/usr/local/sbin/gvt-qm-run %I
 KillSignal=SIGTERM
 TimeoutStopSec=90
 Restart=no
