@@ -1084,7 +1084,10 @@ static void gvt_stream_control_wakeup_input_pulse(const char *reason)
 static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
                                            const char *host,
                                            uint64_t port,
-                                           const char *codec)
+                                           const char *codec,
+                                           int64_t fps,
+                                           int64_t bitrate,
+                                           int64_t keyint)
 {
     bool was_suspended;
 
@@ -1108,6 +1111,22 @@ static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
         gdpy->video_codec = g_strdup(!g_ascii_strcasecmp(codec, "hevc") ?
                                      "h265" : codec);
     }
+    if (fps >= 1 && fps <= 120) {
+        gdpy->encode_fps = fps;
+    }
+    if (bitrate >= 256 && bitrate <= 100000) {
+        gdpy->encode_bitrate = bitrate;
+        if (gdpy->encode_still_bitrate <= 0 ||
+            gdpy->encode_still_bitrate > gdpy->encode_bitrate) {
+            gdpy->encode_still_bitrate = gdpy->encode_bitrate;
+        }
+        if (gdpy->encode_idle_bitrate >= gdpy->encode_bitrate) {
+            gdpy->encode_idle_bitrate = 0;
+        }
+    }
+    if (keyint >= 1 && keyint <= 300) {
+        gdpy->encode_keyint = keyint;
+    }
     gdpy->last_capture_ms = 0;
     gvt_stream_last_input_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     was_suspended = gvt_stream_wake_if_suspended();
@@ -1117,8 +1136,10 @@ static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
         gdpy->last_wakeup_pulse_ms = gvt_stream_last_input_ms;
         gdpy->wakeup_pulse_count++;
     }
-    error_report("gvt-stream-control: stream target=%s:%u codec=%s",
-                 gdpy->rtp_host, (unsigned)gdpy->rtp_port, gdpy->video_codec);
+    error_report("gvt-stream-control: stream target=%s:%u codec=%s "
+                 "fps=%d bitrate=%d keyint=%d",
+                 gdpy->rtp_host, (unsigned)gdpy->rtp_port, gdpy->video_codec,
+                 gdpy->encode_fps, gdpy->encode_bitrate, gdpy->encode_keyint);
     error_report("gvt-stream-control: session ports video_udp=%u spice_tcp=%" PRIu64
                  " input_tcp=%" PRIu64,
                  (unsigned)gdpy->rtp_port, gvt_stream_spice_port,
@@ -1152,6 +1173,31 @@ static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
     return true;
 }
 
+static void gvt_stream_control_current_size(GVTStreamDisplay *gdpy,
+                                            uint32_t *width,
+                                            uint32_t *height)
+{
+    if (!width || !height) {
+        return;
+    }
+    *width = 0;
+    *height = 0;
+    if (!gdpy) {
+        return;
+    }
+    if (gdpy->scanout) {
+        *width = qemu_dmabuf_get_width(gdpy->scanout);
+        *height = qemu_dmabuf_get_height(gdpy->scanout);
+        if (*width && *height) {
+            return;
+        }
+    }
+    if (gdpy->capture_surface) {
+        *width = surface_width(gdpy->capture_surface);
+        *height = surface_height(gdpy->capture_surface);
+    }
+}
+
 static void gvt_stream_control_send_status(GVTStreamControlClient *client,
                                            bool ok,
                                            const char *error)
@@ -1160,6 +1206,8 @@ static void gvt_stream_control_send_status(GVTStreamControlClient *client,
     char message[512];
     int64_t start_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     uint64_t video_udp = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
     ssize_t ret;
 
     if (!client) {
@@ -1171,16 +1219,25 @@ static void gvt_stream_control_send_status(GVTStreamControlClient *client,
     } else if (gvt_stream_control_server) {
         video_udp = gvt_stream_control_server->listen_port;
     }
+    gvt_stream_control_current_size(gdpy, &width, &height);
 
     if (ok) {
         snprintf(message, sizeof(message),
                  "{\"ok\":true,\"video_udp\":%" PRIu64
                  ",\"spice_tcp\":%" PRIu64
                  ",\"input_tcp\":%" PRIu64
+                 ",\"width\":%u"
+                 ",\"height\":%u"
+                 ",\"fps\":%d"
+                 ",\"bitrate\":%d"
                  ",\"codec\":\"%s\"}\n",
                  video_udp,
                  gvt_stream_spice_port,
                  gvt_stream_input_port,
+                 width,
+                 height,
+                 gdpy ? gdpy->encode_fps : 59,
+                 gdpy ? gdpy->encode_bitrate : 18000,
                  (gdpy && gdpy->video_codec) ? gdpy->video_codec : "h265");
     } else {
         snprintf(message, sizeof(message),
@@ -1242,6 +1299,12 @@ static void gvt_stream_control_process_line(GVTStreamControlClient *client,
         const char *host = qdict_get_try_str(dict, "host") ?: client->host;
         const char *codec = qdict_get_try_str(dict, "codec");
         uint64_t port = qdict_get_try_int(dict, "video_port", 0);
+        int64_t fps = gvt_stream_qdict_get_clamped_int(dict, "fps",
+                                                       0, 120, 0);
+        int64_t bitrate = gvt_stream_qdict_get_clamped_int(dict, "bitrate",
+                                                           0, 100000, 0);
+        int64_t keyint = gvt_stream_qdict_get_clamped_int(dict, "keyint",
+                                                          0, 300, 0);
         bool started;
 
         if (!port) {
@@ -1252,7 +1315,8 @@ static void gvt_stream_control_process_line(GVTStreamControlClient *client,
         }
         apply_start_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         started = gvt_stream_control_apply_start(gvt_stream_control_display,
-                                                 host, port, codec);
+                                                 host, port, codec,
+                                                 fps, bitrate, keyint);
         apply_done_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         gvt_stream_control_send_status(client, started,
                                        "invalid start request");
