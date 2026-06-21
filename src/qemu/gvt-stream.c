@@ -39,6 +39,9 @@
 #define GVT_STREAM_FOURCC_XR24 0x34325258u
 #define GVT_STREAM_WAKE_PUMP_NO_SCANOUT_MS 5000u
 #define GVT_STREAM_WAKE_PUMP_SUSPENDED_MS 45000u
+#define GVT_STREAM_DIRTY_BLOCK_DEFAULT 16u
+#define GVT_STREAM_DIRTY_PARTIAL_PPM_DEFAULT 150000u
+#define GVT_STREAM_DIRTY_GLOBAL_PPM_DEFAULT 350000u
 typedef struct GVTStreamDisplay {
     DisplayChangeListener dcl;
     QemuDmaBuf *scanout;
@@ -79,6 +82,35 @@ typedef struct GVTStreamDisplay {
     uint64_t wakeup_pulse_count;
     bool idle_sample_valid;
     uint32_t idle_sample[GVT_STREAM_IDLE_SAMPLE_N];
+    bool low_bandwidth;
+    bool dirty_valid;
+    bool dirty_prev_valid;
+    uint8_t *dirty_prev;
+    size_t dirty_prev_size;
+    int dirty_prev_width;
+    int dirty_prev_height;
+    int dirty_prev_stride;
+    uint32_t dirty_x;
+    uint32_t dirty_y;
+    uint32_t dirty_w;
+    uint32_t dirty_h;
+    uint32_t dirty_mode;
+    uint32_t dirty_block_size;
+    uint64_t dirty_pixel_delta;
+    uint64_t dirty_partial_max_ppm;
+    uint64_t dirty_global_min_ppm;
+    uint64_t dirty_global_burst_frames;
+    uint64_t dirty_global_frames_left;
+    uint64_t dirty_changed_pixels;
+    uint64_t dirty_diff_ppm;
+    uint64_t dirty_background_seq;
+    uint64_t dirty_frame_count;
+    uint64_t dirty_static_count;
+    uint64_t dirty_partial_count;
+    uint64_t dirty_full_count;
+    uint64_t dirty_global_count;
+    uint64_t dirty_skip_count;
+    int dirty_target_bitrate;
     int encode_fps;
     int encode_bitrate;
     int encode_idle_bitrate;
@@ -167,6 +199,8 @@ static void gvt_stream_startup_pump_arm(GVTStreamDisplay *gdpy,
                                         int64_t now_ms);
 static void gvt_stream_startup_pump_stop(GVTStreamDisplay *gdpy);
 static bool gvt_stream_wake_if_suspended(void);
+static const char *gvt_stream_dirty_mode_name(uint32_t mode);
+static void gvt_stream_dirty_reset(GVTStreamDisplay *gdpy);
 
 static uint64_t gvt_stream_port_slot(uint64_t control_port)
 {
@@ -436,6 +470,9 @@ static void gvt_stream_external_fill_common(GVTStreamDisplay *gdpy,
     msg->seq = ++gdpy->external_seq;
     msg->pts_ns = now_ms > 0 ? (uint64_t)now_ms * 1000000ULL : 0;
     msg->fps = gdpy->encode_fps;
+    if (gdpy->low_bandwidth) {
+        msg->flags |= GVT_STREAM_IPC_FLAG_LOW_BANDWIDTH;
+    }
     msg->bitrate = gdpy->encode_bitrate;
     msg->idle_bitrate = gdpy->encode_idle_bitrate;
     msg->still_bitrate = gdpy->encode_still_bitrate;
@@ -623,6 +660,25 @@ static bool gvt_stream_external_send_frame(GVTStreamDisplay *gdpy,
     msg.stride = strides[0];
     msg.offset = (offsets && n_offsets > 0) ? offsets[0] : 0;
     msg.modifier = qemu_dmabuf_get_modifier(dmabuf);
+    if (gdpy->low_bandwidth && gdpy->dirty_valid) {
+        msg.flags |= GVT_STREAM_IPC_FLAG_DIRTY_VALID;
+        msg.dirty_x = gdpy->dirty_x;
+        msg.dirty_y = gdpy->dirty_y;
+        msg.dirty_w = gdpy->dirty_w;
+        msg.dirty_h = gdpy->dirty_h;
+        msg.dirty_ppm = gdpy->dirty_diff_ppm;
+        msg.dirty_mode = gdpy->dirty_mode;
+        msg.dirty_block_size = gdpy->dirty_block_size;
+        msg.dirty_pixels = gdpy->dirty_changed_pixels;
+        msg.background_seq = gdpy->dirty_background_seq;
+        if (gdpy->dirty_mode == GVT_STREAM_DIRTY_STATIC) {
+            msg.flags |= GVT_STREAM_IPC_FLAG_DIRTY_STATIC;
+        } else if (gdpy->dirty_mode == GVT_STREAM_DIRTY_PARTIAL) {
+            msg.flags |= GVT_STREAM_IPC_FLAG_DIRTY_PARTIAL;
+        } else if (gdpy->dirty_mode == GVT_STREAM_DIRTY_GLOBAL) {
+            msg.flags |= GVT_STREAM_IPC_FLAG_DIRTY_GLOBAL;
+        }
+    }
 
     ok = gvt_stream_external_send_message(gdpy, &msg, fds[0]);
     if (ok) {
@@ -631,9 +687,13 @@ static bool gvt_stream_external_send_frame(GVTStreamDisplay *gdpy,
             gdpy->external_frame_count % 60 == 0) {
             error_report("gvt-stream-external: frame-sent #%" PRIu64
                          " seq=%" PRIu64 " fd=%d size=%ux%u stride=%u "
-                         "modifier=0x%016" PRIx64,
+                         "modifier=0x%016" PRIx64
+                         " dirty=%s rect=%u,%u %ux%u ppm=%u target_bitrate=%d",
                          gdpy->external_frame_count, msg.seq, fds[0],
-                         msg.width, msg.height, msg.stride, msg.modifier);
+                         msg.width, msg.height, msg.stride, msg.modifier,
+                         gvt_stream_dirty_mode_name(msg.dirty_mode),
+                         msg.dirty_x, msg.dirty_y, msg.dirty_w, msg.dirty_h,
+                         msg.dirty_ppm, gdpy->dirty_target_bitrate);
         }
     }
     return ok;
@@ -1126,7 +1186,9 @@ static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
         gdpy->encode_bitrate = bitrate;
         if (gdpy->encode_still_bitrate <= 0 ||
             gdpy->encode_still_bitrate > gdpy->encode_bitrate) {
-            gdpy->encode_still_bitrate = gdpy->encode_bitrate;
+            gdpy->encode_still_bitrate = gdpy->low_bandwidth ?
+                MAX(512, gdpy->encode_bitrate * 35 / 100) :
+                gdpy->encode_bitrate;
         }
         if (gdpy->encode_idle_bitrate >= gdpy->encode_bitrate) {
             gdpy->encode_idle_bitrate = 0;
@@ -1136,6 +1198,9 @@ static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
         gdpy->encode_keyint = keyint;
     }
     gdpy->last_capture_ms = 0;
+    if (gdpy->low_bandwidth) {
+        gvt_stream_dirty_reset(gdpy);
+    }
     gvt_stream_last_input_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
     was_suspended = gvt_stream_wake_if_suspended();
     if (was_suspended || !gdpy->scanout) {
@@ -1642,6 +1707,238 @@ static uint64_t gvt_stream_checksum_surface(DisplaySurface *surface)
     return hash;
 }
 
+static const char *gvt_stream_dirty_mode_name(uint32_t mode)
+{
+    switch (mode) {
+    case GVT_STREAM_DIRTY_FULL:
+        return "full";
+    case GVT_STREAM_DIRTY_STATIC:
+        return "static";
+    case GVT_STREAM_DIRTY_PARTIAL:
+        return "partial";
+    case GVT_STREAM_DIRTY_GLOBAL:
+        return "global";
+    default:
+        return "unknown";
+    }
+}
+
+static void gvt_stream_dirty_reset(GVTStreamDisplay *gdpy)
+{
+    gdpy->dirty_valid = false;
+    gdpy->dirty_prev_valid = false;
+    gdpy->dirty_prev_width = 0;
+    gdpy->dirty_prev_height = 0;
+    gdpy->dirty_prev_stride = 0;
+    gdpy->dirty_x = 0;
+    gdpy->dirty_y = 0;
+    gdpy->dirty_w = 0;
+    gdpy->dirty_h = 0;
+    gdpy->dirty_mode = GVT_STREAM_DIRTY_UNKNOWN;
+    gdpy->dirty_changed_pixels = 0;
+    gdpy->dirty_diff_ppm = 0;
+    gdpy->dirty_global_frames_left = 0;
+    gdpy->dirty_target_bitrate = gdpy->encode_bitrate;
+}
+
+static void gvt_stream_dirty_copy_frame(GVTStreamDisplay *gdpy,
+                                        DisplaySurface *surface)
+{
+    uint8_t *data = surface_data(surface);
+    int width = surface_width(surface);
+    int height = surface_height(surface);
+    int stride = surface_stride(surface);
+    size_t need;
+
+    if (!data || width <= 0 || height <= 0 || stride <= 0) {
+        gvt_stream_dirty_reset(gdpy);
+        return;
+    }
+
+    need = (size_t)stride * height;
+    if (gdpy->dirty_prev_size != need) {
+        gdpy->dirty_prev = g_realloc(gdpy->dirty_prev, need);
+        gdpy->dirty_prev_size = need;
+    }
+
+    memcpy(gdpy->dirty_prev, data, need);
+    gdpy->dirty_prev_width = width;
+    gdpy->dirty_prev_height = height;
+    gdpy->dirty_prev_stride = stride;
+    gdpy->dirty_prev_valid = true;
+}
+
+static bool gvt_stream_dirty_pixel_changed(const uint8_t *oldp,
+                                           const uint8_t *newp,
+                                           uint64_t pixel_delta)
+{
+    int db = abs((int)oldp[0] - (int)newp[0]);
+    int dg = abs((int)oldp[1] - (int)newp[1]);
+    int dr = abs((int)oldp[2] - (int)newp[2]);
+
+    return (uint64_t)(db + dg + dr) > pixel_delta * 3;
+}
+
+static int gvt_stream_dirty_target_bitrate(GVTStreamDisplay *gdpy,
+                                           uint32_t mode,
+                                           uint64_t diff_ppm)
+{
+    int still = gdpy->encode_still_bitrate > 0 ?
+        gdpy->encode_still_bitrate : gdpy->encode_bitrate;
+
+    if (mode == GVT_STREAM_DIRTY_PARTIAL) {
+        uint64_t scaled = (uint64_t)gdpy->encode_bitrate *
+            MAX(diff_ppm, 10000ULL) * 3ULL / 1000000ULL;
+        int target = (int)MAX((uint64_t)still, scaled);
+
+        return MIN(target, gdpy->encode_bitrate);
+    }
+    if (mode == GVT_STREAM_DIRTY_STATIC) {
+        return still;
+    }
+    return gdpy->encode_bitrate;
+}
+
+static void gvt_stream_update_dirty_state(GVTStreamDisplay *gdpy,
+                                          DisplaySurface *surface)
+{
+    uint8_t *data = surface_data(surface);
+    int width = surface_width(surface);
+    int height = surface_height(surface);
+    int stride = surface_stride(surface);
+    uint32_t block = gdpy->dirty_block_size ?: GVT_STREAM_DIRTY_BLOCK_DEFAULT;
+    int min_x = width;
+    int min_y = height;
+    int max_x = -1;
+    int max_y = -1;
+    uint64_t changed_pixels = 0;
+    uint64_t total_pixels;
+    uint64_t diff_ppm;
+    int by, bx;
+    uint32_t mode;
+
+    gdpy->dirty_valid = false;
+    gdpy->dirty_mode = GVT_STREAM_DIRTY_UNKNOWN;
+    gdpy->dirty_target_bitrate = gdpy->encode_bitrate;
+
+    if (!data || width <= 0 || height <= 0 || stride < width * 4) {
+        return;
+    }
+
+    total_pixels = (uint64_t)width * height;
+    if (!gdpy->dirty_prev_valid ||
+        gdpy->dirty_prev_width != width ||
+        gdpy->dirty_prev_height != height ||
+        gdpy->dirty_prev_stride != stride ||
+        gdpy->dirty_prev_size < (size_t)stride * height) {
+        gdpy->dirty_x = 0;
+        gdpy->dirty_y = 0;
+        gdpy->dirty_w = width;
+        gdpy->dirty_h = height;
+        gdpy->dirty_changed_pixels = total_pixels;
+        gdpy->dirty_diff_ppm = 1000000;
+        gdpy->dirty_mode = GVT_STREAM_DIRTY_FULL;
+        gdpy->dirty_valid = true;
+        gdpy->dirty_background_seq++;
+        gdpy->dirty_frame_count++;
+        gdpy->dirty_full_count++;
+        gdpy->dirty_target_bitrate = gdpy->encode_bitrate;
+        gvt_stream_dirty_copy_frame(gdpy, surface);
+        return;
+    }
+
+    block = CLAMP(block, 4u, 128u);
+    for (by = 0; by < height; by += block) {
+        int ey = MIN(by + (int)block, height);
+
+        for (bx = 0; bx < width; bx += block) {
+            int ex = MIN(bx + (int)block, width);
+            bool block_changed = false;
+            int y;
+
+            for (y = by; y < ey && !block_changed; y++) {
+                const uint8_t *old_row =
+                    gdpy->dirty_prev + (size_t)y * stride + (size_t)bx * 4;
+                const uint8_t *new_row =
+                    data + (size_t)y * stride + (size_t)bx * 4;
+                int x;
+
+                for (x = bx; x < ex; x++) {
+                    if (gvt_stream_dirty_pixel_changed(old_row, new_row,
+                                                       gdpy->dirty_pixel_delta)) {
+                        block_changed = true;
+                        break;
+                    }
+                    old_row += 4;
+                    new_row += 4;
+                }
+            }
+
+            if (block_changed) {
+                min_x = MIN(min_x, bx);
+                min_y = MIN(min_y, by);
+                max_x = MAX(max_x, ex);
+                max_y = MAX(max_y, ey);
+                changed_pixels += (uint64_t)(ex - bx) * (ey - by);
+            }
+        }
+    }
+
+    diff_ppm = total_pixels ?
+        changed_pixels * 1000000ULL / total_pixels : 1000000ULL;
+
+    if (!changed_pixels) {
+        mode = GVT_STREAM_DIRTY_STATIC;
+        gdpy->dirty_x = 0;
+        gdpy->dirty_y = 0;
+        gdpy->dirty_w = 0;
+        gdpy->dirty_h = 0;
+        gdpy->dirty_static_count++;
+    } else if (diff_ppm >= gdpy->dirty_global_min_ppm) {
+        mode = GVT_STREAM_DIRTY_GLOBAL;
+        gdpy->dirty_global_frames_left =
+            gdpy->dirty_global_burst_frames > 1 ?
+            gdpy->dirty_global_burst_frames - 1 : 0;
+        gdpy->dirty_background_seq++;
+        gdpy->dirty_global_count++;
+        gdpy->dirty_x = 0;
+        gdpy->dirty_y = 0;
+        gdpy->dirty_w = width;
+        gdpy->dirty_h = height;
+    } else if (gdpy->dirty_global_frames_left) {
+        mode = GVT_STREAM_DIRTY_GLOBAL;
+        gdpy->dirty_global_frames_left--;
+        gdpy->dirty_global_count++;
+        gdpy->dirty_x = 0;
+        gdpy->dirty_y = 0;
+        gdpy->dirty_w = width;
+        gdpy->dirty_h = height;
+    } else if (diff_ppm <= gdpy->dirty_partial_max_ppm) {
+        mode = GVT_STREAM_DIRTY_PARTIAL;
+        gdpy->dirty_partial_count++;
+        gdpy->dirty_x = min_x;
+        gdpy->dirty_y = min_y;
+        gdpy->dirty_w = max_x - min_x;
+        gdpy->dirty_h = max_y - min_y;
+    } else {
+        mode = GVT_STREAM_DIRTY_FULL;
+        gdpy->dirty_full_count++;
+        gdpy->dirty_x = 0;
+        gdpy->dirty_y = 0;
+        gdpy->dirty_w = width;
+        gdpy->dirty_h = height;
+    }
+
+    gdpy->dirty_mode = mode;
+    gdpy->dirty_changed_pixels = changed_pixels;
+    gdpy->dirty_diff_ppm = diff_ppm;
+    gdpy->dirty_valid = true;
+    gdpy->dirty_frame_count++;
+    gdpy->dirty_target_bitrate =
+        gvt_stream_dirty_target_bitrate(gdpy, mode, diff_ppm);
+    gvt_stream_dirty_copy_frame(gdpy, surface);
+}
+
 static void gvt_stream_update_idle_sample(GVTStreamDisplay *gdpy,
                                           DisplaySurface *surface,
                                           int64_t now_ms)
@@ -1710,15 +2007,20 @@ static void gvt_stream_probe_activity(GVTStreamDisplay *gdpy,
 {
 #ifdef CONFIG_GBM
     uint32_t width, height, texture;
+    bool do_idle_probe;
+    bool do_dirty_probe;
 
-    if (!gdpy->idle_probe_ms || !dmabuf ||
-        (gdpy->last_probe_ms &&
-         now_ms - gdpy->last_probe_ms < gdpy->idle_probe_ms)) {
+    if (!dmabuf) {
         return;
     }
 
-    gdpy->last_probe_ms = now_ms;
-    gdpy->idle_probe_count++;
+    do_dirty_probe = gdpy->low_bandwidth;
+    do_idle_probe = gdpy->idle_probe_ms &&
+        (!gdpy->last_probe_ms ||
+         now_ms - gdpy->last_probe_ms >= gdpy->idle_probe_ms);
+    if (!do_dirty_probe && !do_idle_probe) {
+        return;
+    }
 
     egl_dmabuf_import_texture(dmabuf);
     texture = qemu_dmabuf_get_texture(dmabuf);
@@ -1757,7 +2059,14 @@ static void gvt_stream_probe_activity(GVTStreamDisplay *gdpy,
     egl_fb_read(gdpy->capture_surface, &gdpy->capture_fb);
     gdpy->last_capture_checksum =
         gvt_stream_checksum_surface(gdpy->capture_surface);
-    gvt_stream_update_idle_sample(gdpy, gdpy->capture_surface, now_ms);
+    if (do_idle_probe) {
+        gdpy->last_probe_ms = now_ms;
+        gdpy->idle_probe_count++;
+        gvt_stream_update_idle_sample(gdpy, gdpy->capture_surface, now_ms);
+    }
+    if (do_dirty_probe) {
+        gvt_stream_update_dirty_state(gdpy, gdpy->capture_surface);
+    }
 #endif
 }
 
@@ -1871,10 +2180,28 @@ static void gvt_stream_capture_frame(GVTStreamDisplay *gdpy, int64_t now_ms)
         }
         gdpy->capture_count++;
         gdpy->last_capture_ms = now_ms;
-        gvt_stream_external_send_frame(gdpy, dmabuf, now_ms);
-        counted = true;
-        if (!gdpy->capture_dir) {
-            return;
+        if (gdpy->low_bandwidth && gdpy->dirty_valid &&
+            gdpy->dirty_mode == GVT_STREAM_DIRTY_STATIC) {
+            gdpy->dirty_skip_count++;
+            if (gdpy->verbose || gdpy->dirty_skip_count <= 5 ||
+                gdpy->dirty_skip_count % 60 == 0) {
+                error_report("gvt-stream-lowbw: skip-static #%" PRIu64
+                             " seq_next=%" PRIu64 " background=%" PRIu64
+                             " ppm=%" PRIu64 " frames=%" PRIu64,
+                             gdpy->dirty_skip_count, gdpy->external_seq + 1,
+                             gdpy->dirty_background_seq,
+                             gdpy->dirty_diff_ppm, gdpy->dirty_frame_count);
+            }
+            counted = true;
+            if (!gdpy->capture_dir) {
+                return;
+            }
+        } else {
+            gvt_stream_external_send_frame(gdpy, dmabuf, now_ms);
+            counted = true;
+            if (!gdpy->capture_dir) {
+                return;
+            }
         }
     }
 
@@ -2092,6 +2419,7 @@ static void gvt_stream_scanout_disable(DisplayChangeListener *dcl)
     egl_fb_destroy(&gdpy->guest_fb);
     egl_fb_destroy(&gdpy->capture_fb);
     g_clear_pointer(&gdpy->capture_surface, qemu_free_displaysurface);
+    gvt_stream_dirty_reset(gdpy);
     if (active) {
         gvt_stream_external_send_no_scanout(gdpy, now_ms);
         gvt_stream_startup_pump_arm(gdpy, now_ms);
@@ -2253,6 +2581,10 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      " streamd_encoded=%" PRIu64
                      " streamd_failures=%" PRIu64
                      " bitrate=%d target_bitrate=%d capture_ms=%" PRIu64
+                     " dirty=%s dirty_rect=%u,%u %ux%u dirty_ppm=%" PRIu64
+                     " dirty_frames=%" PRIu64 " dirty_static=%" PRIu64
+                     " dirty_partial=%" PRIu64 " dirty_full=%" PRIu64
+                     " dirty_global=%" PRIu64 " dirty_skipped=%" PRIu64
                      " probe_diff_ppm=%" PRIu64 " probes=%" PRIu64
                      " idle_wakes=%" PRIu64 " wake_pulses=%" PRIu64
                      " input_msgs=%" PRIu64 " input_events=%" PRIu64
@@ -2272,8 +2604,15 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      gdpy->external_encoded,
                      gdpy->external_encode_failures,
                      gdpy->encode_bitrate,
-                     gdpy->encode_bitrate,
+                     gdpy->dirty_target_bitrate,
                      gvt_stream_effective_capture_ms(gdpy, now_ms),
+                     gvt_stream_dirty_mode_name(gdpy->dirty_mode),
+                     gdpy->dirty_x, gdpy->dirty_y,
+                     gdpy->dirty_w, gdpy->dirty_h,
+                     gdpy->dirty_diff_ppm, gdpy->dirty_frame_count,
+                     gdpy->dirty_static_count, gdpy->dirty_partial_count,
+                     gdpy->dirty_full_count, gdpy->dirty_global_count,
+                     gdpy->dirty_skip_count,
                       gdpy->last_probe_diff_ppm, gdpy->idle_probe_count,
                       gdpy->idle_wake_count, gdpy->wakeup_pulse_count,
                       gvt_stream_input_server ?
@@ -2375,6 +2714,8 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                                                 1000, 100, 60000);
         gdpy->verbose = gvt_stream_getenv_bool("GVT_STREAM_VERBOSE", false);
         gdpy->import_test = gvt_stream_getenv_bool("GVT_STREAM_IMPORT_TEST", false);
+        gdpy->low_bandwidth =
+            gvt_stream_getenv_bool("GVT_STREAM_LOW_BANDWIDTH", false);
         {
             const char *socket_path = g_getenv("GVT_STREAMD_SOCKET");
 
@@ -2403,6 +2744,23 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->idle_pixel_delta =
             gvt_stream_getenv_u64("GVT_STREAM_IDLE_PIXEL_DELTA",
                                   8, 0, 255);
+        gdpy->dirty_block_size =
+            gvt_stream_getenv_u64("GVT_STREAM_DIRTY_BLOCK_SIZE",
+                                  GVT_STREAM_DIRTY_BLOCK_DEFAULT, 4, 128);
+        gdpy->dirty_pixel_delta =
+            gvt_stream_getenv_u64("GVT_STREAM_DIRTY_PIXEL_DELTA",
+                                  gdpy->idle_pixel_delta, 0, 255);
+        gdpy->dirty_partial_max_ppm =
+            gvt_stream_getenv_u64("GVT_STREAM_DIRTY_PARTIAL_MAX_PPM",
+                                  GVT_STREAM_DIRTY_PARTIAL_PPM_DEFAULT,
+                                  0, 1000000);
+        gdpy->dirty_global_min_ppm =
+            gvt_stream_getenv_u64("GVT_STREAM_DIRTY_GLOBAL_MIN_PPM",
+                                  GVT_STREAM_DIRTY_GLOBAL_PPM_DEFAULT,
+                                  0, 1000000);
+        gdpy->dirty_global_burst_frames =
+            gvt_stream_getenv_u64("GVT_STREAM_DIRTY_GLOBAL_BURST_FRAMES",
+                                  2, 1, 10);
         gdpy->capture_max = gvt_stream_getenv_u64("GVT_STREAM_CAPTURE_MAX",
                                                    0, 0, 1000000);
         gdpy->startup_pump_ms =
@@ -2423,9 +2781,16 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->encode_idle_bitrate =
             gvt_stream_getenv_u64("GVT_STREAM_ENCODE_IDLE_BITRATE",
                                   0, 0, 100000);
-        gdpy->encode_still_bitrate =
-            gvt_stream_getenv_u64("GVT_STREAM_ENCODE_STILL_BITRATE",
-                                  gdpy->encode_bitrate, 0, 100000);
+        {
+            uint64_t still_default = gdpy->low_bandwidth ?
+                MAX(512ULL, (uint64_t)gdpy->encode_bitrate * 35ULL / 100ULL) :
+                (uint64_t)gdpy->encode_bitrate;
+
+            gdpy->encode_still_bitrate =
+                gvt_stream_getenv_u64("GVT_STREAM_ENCODE_STILL_BITRATE",
+                                      still_default, 0, 100000);
+        }
+        gdpy->dirty_target_bitrate = gdpy->encode_bitrate;
         gdpy->encode_rate_control =
             g_strdup(g_getenv("GVT_STREAM_ENCODE_RATE_CONTROL") ?: "cbr");
         if (g_ascii_strcasecmp(gdpy->encode_rate_control, "cbr") &&
@@ -2506,6 +2871,9 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
 
         error_report("gvt-stream: listener console=%d refresh_ms=%" PRIu64
                      " report_ms=%" PRIu64 " verbose=%d import_test=%d "
+                     "low_bandwidth=%d dirty_block=%u dirty_delta=%" PRIu64
+                     " dirty_partial_ppm=%" PRIu64 " dirty_global_ppm=%" PRIu64
+                     " dirty_global_burst=%" PRIu64 " "
                      "capture_dir=%s capture_ms=%" PRIu64 " idle_capture_ms=%" PRIu64
                      " idle_after_ms=%" PRIu64 " idle_probe_ms=%" PRIu64
                      " idle_changed_ppm=%" PRIu64 " idle_pixel_delta=%" PRIu64
@@ -2517,6 +2885,11 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      "rtp=%s:%u mtu=%d",
                      qemu_console_get_index(con), gdpy->refresh_ms,
                      gdpy->report_ms, gdpy->verbose, gdpy->import_test,
+                     gdpy->low_bandwidth, gdpy->dirty_block_size,
+                     gdpy->dirty_pixel_delta,
+                     gdpy->dirty_partial_max_ppm,
+                     gdpy->dirty_global_min_ppm,
+                     gdpy->dirty_global_burst_frames,
                      gdpy->capture_dir ?: "", gdpy->capture_ms,
                      gdpy->idle_capture_ms,
                      gdpy->idle_after_ms,

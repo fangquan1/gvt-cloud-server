@@ -311,8 +311,9 @@ GVT-g VFIO DMABUF -> QEMU gvt-stream -> Unix SOCK_SEQPACKET/SCM_RIGHTS
   -> gvt-streamd appsrc -> VAAPI postproc/encoder -> RTP
 ```
 
-The v1 IPC supports only one-plane `XR24/BGRx` DMABUF frames. CPU raw frame IPC
-and the previous in-QEMU encoder/RTP path are intentionally removed.
+The v2 IPC still carries one-plane `XR24/BGRx` DMABUF frames, plus optional
+dirty-region metadata for low-bandwidth experiments. CPU raw frame IPC and the
+previous in-QEMU encoder/RTP path are intentionally removed.
 
 The backend defaults to H.265/HEVC and still accepts H.264 when the client asks
 for it. Useful runtime knobs:
@@ -325,6 +326,28 @@ for it. Useful runtime knobs:
 - `GVT_STREAMD_SOCKET=/root/qemu_cmd/<vm-id>-gvt-streamd.sock`
 - `GVT_STREAM_IDLE_CAPTURE_MS`, `GVT_STREAM_IDLE_AFTER_MS`,
   `GVT_STREAM_IDLE_PROBE_MS` for optional power-saving behavior
+
+Experimental low-bandwidth knobs:
+
+- `GVT_STREAM_LOW_BANDWIDTH=1` enables per-frame EGL readback and dirty-region
+  classification in QEMU.
+- `GVT_STREAM_DIRTY_BLOCK_SIZE=16` controls the diff grid size.
+- `GVT_STREAM_DIRTY_PIXEL_DELTA=8` is the per-channel noise threshold.
+- `GVT_STREAM_DIRTY_PARTIAL_MAX_PPM=150000` marks small changes as partial
+  candidates.
+- `GVT_STREAM_DIRTY_GLOBAL_MIN_PPM=350000` immediately switches full-screen
+  changes back to global mode.
+- `GVT_STREAM_DIRTY_GLOBAL_BURST_FRAMES=2` keeps global mode for a short burst
+  after a large change.
+- `GVT_STREAM_ENCODE_STILL_BITRATE` optionally overrides the low-bandwidth
+  small-dirty-region bitrate. If unset, QEMU uses about 35% of the requested
+  bitrate when low-bandwidth mode is enabled.
+
+Current low-bandwidth behavior is compatible with the existing RTP viewer:
+static frames are not re-submitted after the first full frame, partial
+candidates are still encoded as full-size H.265 pictures at reduced VAAPI
+bitrate, and global changes switch back to full bitrate immediately. A true ROI
+substream still requires a client-side background cache/compositor protocol.
 
 When the client disconnects, the active control connection closes and QEMU
 asks `gvt-streamd` to stop encoding. When the guest display sleeps or scanout

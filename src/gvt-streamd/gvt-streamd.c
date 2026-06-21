@@ -62,6 +62,7 @@ typedef struct GVTStreamd {
     int64_t last_wall_ms;
     int pipeline_width;
     int pipeline_height;
+    uint32_t current_bitrate;
 
     int last_fd;
     GVTStreamIpcMessage last_meta;
@@ -73,6 +74,11 @@ typedef struct GVTStreamd {
     uint64_t no_scanout;
     uint64_t failures;
     uint64_t stats_sent;
+    uint64_t dirty_static_frames;
+    uint64_t dirty_partial_frames;
+    uint64_t dirty_full_frames;
+    uint64_t dirty_global_frames;
+    uint64_t bitrate_changes;
 } GVTStreamd;
 
 static volatile sig_atomic_t stop_requested;
@@ -114,6 +120,22 @@ static const char *streamd_codec(GVTStreamd *s)
 static const char *streamd_rate_control(GVTStreamd *s)
 {
     return s->rate_control[0] ? s->rate_control : "cbr";
+}
+
+static const char *streamd_dirty_mode_name(uint32_t mode)
+{
+    switch (mode) {
+    case GVT_STREAM_DIRTY_FULL:
+        return "full";
+    case GVT_STREAM_DIRTY_STATIC:
+        return "static";
+    case GVT_STREAM_DIRTY_PARTIAL:
+        return "partial";
+    case GVT_STREAM_DIRTY_GLOBAL:
+        return "global";
+    default:
+        return "unknown";
+    }
 }
 
 static void streamd_send_stats(GVTStreamd *s)
@@ -241,6 +263,7 @@ static void streamd_encoder_finish(GVTStreamd *s)
     s->pipeline = NULL;
     s->pipeline_width = 0;
     s->pipeline_height = 0;
+    s->current_bitrate = 0;
     s->pts = 0;
     s->last_wall_ms = 0;
 }
@@ -362,6 +385,7 @@ static bool streamd_encoder_start(GVTStreamd *s, uint32_t width,
 
     s->pipeline_width = (int)width;
     s->pipeline_height = (int)height;
+    s->current_bitrate = s->bitrate;
     g_printerr("gvt-streamd: encode-start codec=%s rtp=%s:%u size=%ux%u "
                "fps=%u rate_control=%s bitrate=%u keyint=%u mtu=%u fec=%u/%u "
                "dmabuf_caps=%d\n",
@@ -393,6 +417,75 @@ static void streamd_stamp_buffer(GVTStreamd *s, GstBuffer *buf)
     GST_BUFFER_DURATION(buf) = duration;
     s->pts += duration;
     s->last_wall_ms = now_ms;
+}
+
+static uint32_t streamd_target_bitrate(GVTStreamd *s,
+                                       const GVTStreamIpcMessage *msg)
+{
+    uint32_t mode = msg && (msg->flags & GVT_STREAM_IPC_FLAG_DIRTY_VALID) ?
+        msg->dirty_mode : GVT_STREAM_DIRTY_FULL;
+    uint32_t still = s->still_bitrate ? s->still_bitrate : s->bitrate;
+
+    if (mode == GVT_STREAM_DIRTY_PARTIAL) {
+        uint64_t scaled = (uint64_t)s->bitrate *
+            MAX((uint64_t)msg->dirty_ppm, 10000ULL) * 3ULL / 1000000ULL;
+        uint64_t target = MAX((uint64_t)still, scaled);
+
+        return (uint32_t)MIN(target, (uint64_t)s->bitrate);
+    }
+    if (mode == GVT_STREAM_DIRTY_STATIC) {
+        return MIN(still, s->bitrate);
+    }
+    return s->bitrate;
+}
+
+static void streamd_note_dirty_frame(GVTStreamd *s,
+                                     const GVTStreamIpcMessage *msg)
+{
+    if (!msg || !(msg->flags & GVT_STREAM_IPC_FLAG_DIRTY_VALID)) {
+        return;
+    }
+
+    switch (msg->dirty_mode) {
+    case GVT_STREAM_DIRTY_STATIC:
+        s->dirty_static_frames++;
+        break;
+    case GVT_STREAM_DIRTY_PARTIAL:
+        s->dirty_partial_frames++;
+        break;
+    case GVT_STREAM_DIRTY_GLOBAL:
+        s->dirty_global_frames++;
+        break;
+    case GVT_STREAM_DIRTY_FULL:
+        s->dirty_full_frames++;
+        break;
+    default:
+        break;
+    }
+}
+
+static void streamd_apply_frame_policy(GVTStreamd *s,
+                                       const GVTStreamIpcMessage *msg)
+{
+    uint32_t target = streamd_target_bitrate(s, msg);
+
+    streamd_note_dirty_frame(s, msg);
+    if (!s->encoder || !target || s->current_bitrate == target) {
+        return;
+    }
+
+    g_object_set(G_OBJECT(s->encoder), "bitrate", target, NULL);
+    s->current_bitrate = target;
+    s->bitrate_changes++;
+    if (s->bitrate_changes <= 10 || s->bitrate_changes % 60 == 0) {
+        g_printerr("gvt-streamd: bitrate-change #=%" PRIu64
+                   " target=%u base=%u dirty=%s ppm=%u rect=%u,%u %ux%u\n",
+                   s->bitrate_changes, target, s->bitrate,
+                   msg ? streamd_dirty_mode_name(msg->dirty_mode) : "unknown",
+                   msg ? msg->dirty_ppm : 0,
+                   msg ? msg->dirty_x : 0, msg ? msg->dirty_y : 0,
+                   msg ? msg->dirty_w : 0, msg ? msg->dirty_h : 0);
+    }
 }
 
 static void streamd_cache_last_frame(GVTStreamd *s,
@@ -446,6 +539,15 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
         return false;
     }
 
+    if ((msg->flags & GVT_STREAM_IPC_FLAG_DIRTY_VALID) &&
+        msg->dirty_mode == GVT_STREAM_DIRTY_STATIC) {
+        if (fd >= 0) {
+            close(fd);
+        }
+        streamd_note_dirty_frame(s, msg);
+        return true;
+    }
+
     if (fd < 0) {
         if (s->last_fd < 0) {
             return false;
@@ -465,6 +567,7 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
         close(fd);
         return false;
     }
+    streamd_apply_frame_policy(s, msg);
     if (!s->dmabuf_allocator) {
         s->dmabuf_allocator = gst_dmabuf_allocator_new();
         if (!s->dmabuf_allocator) {
@@ -511,9 +614,13 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
     if (s->frames <= 5 || s->frames % 60 == 0) {
         g_printerr("gvt-streamd: dmabuf-push-ok #=%" PRIu64
                    " source=%s size=%ux%u stride=%u cached=%" PRIu64
-                   " failures=%" PRIu64 "\n",
+                   " dirty=%s rect=%u,%u %ux%u ppm=%u bitrate=%u "
+                   "failures=%" PRIu64 "\n",
                    s->frames, source ?: "live", msg->width, msg->height,
-                   msg->stride, s->cached_frames, s->failures);
+                   msg->stride, s->cached_frames,
+                   streamd_dirty_mode_name(msg->dirty_mode),
+                   msg->dirty_x, msg->dirty_y, msg->dirty_w, msg->dirty_h,
+                   msg->dirty_ppm, s->current_bitrate, s->failures);
         streamd_send_stats(s);
     }
     return true;
@@ -545,9 +652,10 @@ static void streamd_apply_start(GVTStreamd *s, const GVTStreamIpcMessage *msg)
 
     streamd_encoder_finish(s);
     g_printerr("gvt-streamd: start #%" PRIu64 " target=%s:%u codec=%s "
-               "fps=%u bitrate=%u keyint=%u mtu=%u fec=%u/%u flags=0x%x\n",
+               "fps=%u bitrate=%u still_bitrate=%u keyint=%u mtu=%u "
+               "fec=%u/%u flags=0x%x\n",
                s->starts, s->host, s->rtp_port, s->codec, s->fps,
-               s->bitrate, s->keyint, s->mtu, s->rtp_fec,
+               s->bitrate, s->still_bitrate, s->keyint, s->mtu, s->rtp_fec,
                s->rtp_fec_important, s->flags);
 }
 
@@ -558,8 +666,14 @@ static void streamd_apply_stop(GVTStreamd *s)
     streamd_encoder_finish(s);
     streamd_send_stats(s);
     g_printerr("gvt-streamd: stop #%" PRIu64 " frames=%" PRIu64
-               " cached=%" PRIu64 " failures=%" PRIu64 "\n",
-               s->stops, s->frames, s->cached_frames, s->failures);
+               " cached=%" PRIu64 " dirty_static=%" PRIu64
+               " dirty_partial=%" PRIu64 " dirty_full=%" PRIu64
+               " dirty_global=%" PRIu64 " bitrate_changes=%" PRIu64
+               " failures=%" PRIu64 "\n",
+               s->stops, s->frames, s->cached_frames,
+               s->dirty_static_frames, s->dirty_partial_frames,
+               s->dirty_full_frames, s->dirty_global_frames,
+               s->bitrate_changes, s->failures);
 }
 
 static void streamd_apply_no_scanout(GVTStreamd *s,
