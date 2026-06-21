@@ -244,15 +244,23 @@ static uint64_t gvt_stream_effective_capture_ms(GVTStreamDisplay *gdpy,
                                                 int64_t now_ms)
 {
     int64_t last_activity_ms = gvt_stream_last_activity_ms(gdpy);
+    uint64_t capture_ms = gdpy->capture_ms;
+    uint64_t fps_capture_ms;
 
-    if (gdpy->idle_capture_ms <= gdpy->capture_ms ||
-        !gdpy->idle_after_ms || !last_activity_ms) {
-        return gdpy->capture_ms;
+    if (gdpy->idle_capture_ms > gdpy->capture_ms &&
+        gdpy->idle_after_ms && last_activity_ms &&
+        now_ms - last_activity_ms > gdpy->idle_after_ms) {
+        capture_ms = gdpy->idle_capture_ms;
     }
-    if (now_ms - last_activity_ms <= gdpy->idle_after_ms) {
-        return gdpy->capture_ms;
+
+    if (gdpy->encode_fps > 0) {
+        fps_capture_ms = (1000 + (uint64_t)gdpy->encode_fps - 1) /
+                         (uint64_t)gdpy->encode_fps;
+        if (fps_capture_ms > capture_ms) {
+            capture_ms = fps_capture_ms;
+        }
     }
-    return gdpy->idle_capture_ms;
+    return capture_ms;
 }
 
 static int64_t gvt_stream_last_activity_ms(GVTStreamDisplay *gdpy)
@@ -1137,9 +1145,11 @@ static bool gvt_stream_control_apply_start(GVTStreamDisplay *gdpy,
         gdpy->wakeup_pulse_count++;
     }
     error_report("gvt-stream-control: stream target=%s:%u codec=%s "
-                 "fps=%d bitrate=%d keyint=%d",
+                 "fps=%d bitrate=%d keyint=%d capture_ms=%" PRIu64,
                  gdpy->rtp_host, (unsigned)gdpy->rtp_port, gdpy->video_codec,
-                 gdpy->encode_fps, gdpy->encode_bitrate, gdpy->encode_keyint);
+                 gdpy->encode_fps, gdpy->encode_bitrate, gdpy->encode_keyint,
+                 gvt_stream_effective_capture_ms(gdpy,
+                                                 gvt_stream_last_input_ms));
     error_report("gvt-stream-control: session ports video_udp=%u spice_tcp=%" PRIu64
                  " input_tcp=%" PRIu64,
                  (unsigned)gdpy->rtp_port, gvt_stream_spice_port,
@@ -1986,7 +1996,15 @@ static void gvt_stream_startup_pump_cb(void *opaque)
         return;
     }
 
-    interval_ms = gdpy->startup_pump_interval_ms ?: gdpy->capture_ms;
+    interval_ms = gdpy->startup_pump_interval_ms ?:
+                  gvt_stream_effective_capture_ms(gdpy, now_ms);
+    if (gdpy->startup_pump_interval_ms) {
+        uint64_t effective_ms = gvt_stream_effective_capture_ms(gdpy, now_ms);
+
+        if (effective_ms > interval_ms) {
+            interval_ms = effective_ms;
+        }
+    }
     if (!interval_ms) {
         interval_ms = 17;
     }
@@ -2003,7 +2021,15 @@ static void gvt_stream_startup_pump_arm(GVTStreamDisplay *gdpy,
         return;
     }
 
-    interval_ms = gdpy->startup_pump_interval_ms ?: gdpy->capture_ms;
+    interval_ms = gdpy->startup_pump_interval_ms ?:
+                  gvt_stream_effective_capture_ms(gdpy, now_ms);
+    if (gdpy->startup_pump_interval_ms) {
+        uint64_t effective_ms = gvt_stream_effective_capture_ms(gdpy, now_ms);
+
+        if (effective_ms > interval_ms) {
+            interval_ms = effective_ms;
+        }
+    }
     if (!interval_ms) {
         interval_ms = 17;
     }
