@@ -60,6 +60,8 @@ typedef struct GVTStreamd {
     GstClockTime pts;
     GstClockTime duration;
     int64_t last_wall_ms;
+    uint64_t frame_interval_ns;
+    uint64_t next_frame_due_ns;
     int pipeline_width;
     int pipeline_height;
 
@@ -69,6 +71,7 @@ typedef struct GVTStreamd {
     uint64_t starts;
     uint64_t stops;
     uint64_t frames;
+    uint64_t dropped_frames;
     uint64_t cached_frames;
     uint64_t no_scanout;
     uint64_t failures;
@@ -80,6 +83,27 @@ static volatile sig_atomic_t stop_requested;
 static int64_t streamd_now_ms(void)
 {
     return g_get_monotonic_time() / 1000;
+}
+
+static uint64_t streamd_now_ns(void)
+{
+    return (uint64_t)g_get_monotonic_time() * 1000ULL;
+}
+
+static uint64_t streamd_frame_interval_ns(uint32_t fps)
+{
+    if (fps < 1) {
+        fps = 59;
+    }
+    return gst_util_uint64_scale_int(1, GST_SECOND, (int)fps);
+}
+
+static uint64_t streamd_frame_time_ns(const GVTStreamIpcMessage *msg)
+{
+    if (msg && msg->pts_ns) {
+        return msg->pts_ns;
+    }
+    return streamd_now_ns();
 }
 
 static void streamd_signal_handler(int sig)
@@ -420,6 +444,44 @@ static void streamd_cache_last_frame(GVTStreamd *s,
     s->last_meta = *msg;
 }
 
+static bool streamd_should_push_frame(GVTStreamd *s,
+                                      const GVTStreamIpcMessage *msg,
+                                      const char *source)
+{
+    uint64_t frame_ns;
+    uint64_t interval_ns;
+
+    interval_ns = s->frame_interval_ns ?:
+                  streamd_frame_interval_ns(s->fps);
+    if (!interval_ns) {
+        return true;
+    }
+
+    frame_ns = streamd_frame_time_ns(msg);
+    if (!s->next_frame_due_ns) {
+        s->next_frame_due_ns = frame_ns + interval_ns;
+        return true;
+    }
+
+    if (frame_ns >= s->next_frame_due_ns) {
+        do {
+            s->next_frame_due_ns += interval_ns;
+        } while (s->next_frame_due_ns <= frame_ns);
+        return true;
+    }
+
+    s->dropped_frames++;
+    if (s->dropped_frames <= 5 || s->dropped_frames % 60 == 0) {
+        g_printerr("gvt-streamd: frame-drop #=%" PRIu64
+                   " source=%s target_fps=%u next_due_ms=%" PRIu64
+                   " frame_ms=%" PRIu64 " encoded=%" PRIu64 "\n",
+                   s->dropped_frames, source ?: "live", s->fps,
+                   (uint64_t)(s->next_frame_due_ns / 1000000ULL),
+                   (uint64_t)(frame_ns / 1000000ULL), s->frames);
+    }
+    return false;
+}
+
 static bool streamd_push_dmabuf(GVTStreamd *s,
                                 const GVTStreamIpcMessage *msg,
                                 int fd,
@@ -459,6 +521,13 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
         }
     } else {
         streamd_cache_last_frame(s, msg, fd);
+    }
+
+    if (!streamd_should_push_frame(s, msg, source)) {
+        if (fd >= 0) {
+            close(fd);
+        }
+        return true;
     }
 
     if (!streamd_encoder_start(s, msg->width, msg->height)) {
@@ -511,9 +580,10 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
     if (s->frames <= 5 || s->frames % 60 == 0) {
         g_printerr("gvt-streamd: dmabuf-push-ok #=%" PRIu64
                    " source=%s size=%ux%u stride=%u cached=%" PRIu64
-                   " failures=%" PRIu64 "\n",
+                   " dropped=%" PRIu64 " failures=%" PRIu64 "\n",
                    s->frames, source ?: "live", msg->width, msg->height,
-                   msg->stride, s->cached_frames, s->failures);
+                   msg->stride, s->cached_frames, s->dropped_frames,
+                   s->failures);
         streamd_send_stats(s);
     }
     return true;
@@ -524,11 +594,13 @@ static void streamd_apply_start(GVTStreamd *s, const GVTStreamIpcMessage *msg)
     s->starts++;
     s->started = true;
     s->flags = msg->flags;
-    s->fps = msg->fps ?: 59;
+    s->fps = (msg->fps >= 1 && msg->fps <= 120) ? msg->fps : 59;
     s->bitrate = msg->bitrate ?: 18000;
     s->idle_bitrate = msg->idle_bitrate;
     s->still_bitrate = msg->still_bitrate ?: s->bitrate;
     s->keyint = msg->keyint ?: 59;
+    s->frame_interval_ns = streamd_frame_interval_ns(s->fps);
+    s->next_frame_due_ns = 0;
     s->mtu = msg->mtu ?: 1400;
     s->rtp_port = msg->rtp_port;
     s->rtp_fec = msg->rtp_fec;
@@ -545,21 +617,25 @@ static void streamd_apply_start(GVTStreamd *s, const GVTStreamIpcMessage *msg)
 
     streamd_encoder_finish(s);
     g_printerr("gvt-streamd: start #%" PRIu64 " target=%s:%u codec=%s "
-               "fps=%u bitrate=%u keyint=%u mtu=%u fec=%u/%u flags=0x%x\n",
+               "fps=%u interval_ns=%" PRIu64
+               " bitrate=%u keyint=%u mtu=%u fec=%u/%u flags=0x%x\n",
                s->starts, s->host, s->rtp_port, s->codec, s->fps,
-               s->bitrate, s->keyint, s->mtu, s->rtp_fec,
-               s->rtp_fec_important, s->flags);
+               s->frame_interval_ns, s->bitrate, s->keyint, s->mtu,
+               s->rtp_fec, s->rtp_fec_important, s->flags);
 }
 
 static void streamd_apply_stop(GVTStreamd *s)
 {
     s->stops++;
     s->started = false;
+    s->next_frame_due_ns = 0;
     streamd_encoder_finish(s);
     streamd_send_stats(s);
     g_printerr("gvt-streamd: stop #%" PRIu64 " frames=%" PRIu64
-               " cached=%" PRIu64 " failures=%" PRIu64 "\n",
-               s->stops, s->frames, s->cached_frames, s->failures);
+               " cached=%" PRIu64 " dropped=%" PRIu64
+               " failures=%" PRIu64 "\n",
+               s->stops, s->frames, s->cached_frames, s->dropped_frames,
+               s->failures);
 }
 
 static void streamd_apply_no_scanout(GVTStreamd *s,
@@ -687,6 +763,7 @@ static void streamd_close_client(GVTStreamd *s)
         s->client_fd = -1;
     }
     s->started = false;
+    s->next_frame_due_ns = 0;
     streamd_encoder_finish(s);
 }
 
@@ -838,6 +915,7 @@ int main(int argc, char **argv)
     s.still_bitrate = 18000;
     s.keyint = 59;
     s.mtu = 1400;
+    s.frame_interval_ns = streamd_frame_interval_ns(s.fps);
     g_strlcpy(s.codec, "h265", sizeof(s.codec));
     g_strlcpy(s.rate_control, "cbr", sizeof(s.rate_control));
 
