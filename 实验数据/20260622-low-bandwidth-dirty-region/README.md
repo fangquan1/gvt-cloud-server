@@ -95,6 +95,85 @@ ssh root@192.168.0.188 "chmod +x /tmp/gvt-lowbw-build/scripts/build-gvt-streamd 
 - 未在远端实机上打开 `LOW_BANDWIDTH_ROI=1` +
   `GVT_SPICE_VIEWER_ROI_COMPOSITOR=1` 做带宽和画面完整性实测。
 
+## 2026-06-22 live ROI validation addendum
+
+Remote deployment:
+
+- Backup before deployment: `/root/qemu_cmd/backup-lowbw-roi-20260622-020924`.
+- Runtime config for ROI validation:
+  - `LOW_BANDWIDTH=1`
+  - `LOW_BANDWIDTH_ROI=1`
+  - `DIRTY_BLOCK_SIZE=16`
+  - `DIRTY_PIXEL_DELTA=8`
+  - `DIRTY_PARTIAL_MAX_PPM=150000`
+  - `DIRTY_GLOBAL_MIN_PPM=350000`
+  - `DIRTY_GLOBAL_BURST_FRAMES=2`
+  - `ENCODE_STILL_BITRATE=2500`
+
+VAAPI ROI safety fix:
+
+- Tiny ROI pictures such as 32x16/32x32 triggered a VAAPI H.265 assertion in
+  `gstvaapiencoder_h265.c:add_slice_headers`.
+- QEMU now expands partial ROI encode rectangles to at least 128x128, aligned
+  to 64 pixels and clamped inside the source frame.
+- Remote QEMU rebuild passed, and follow-up runs had `streamd_failures=0`.
+
+Bandwidth comparison:
+
+- Baseline global H.265 run:
+  `client/build/lowbw-baseline-global-20260622-0232`
+  - `streamd_bytes_delta=29387731`
+  - `streamd_encoded_delta=780`
+  - `streamd_failures_delta=0`
+- ROI compositor run:
+  `client/build/lowbw-roi-compare-20260622-0230`
+  - `streamd_bytes_delta=170721`
+  - `streamd_encoded_delta=5`
+  - `streamd_roi_delta=4`
+  - `dirty_partial_delta=46`
+  - `dirty_static_delta=684`
+  - `streamd_failures_delta=0`
+- Reduction: 99.42% versus the baseline 20-second window.
+
+Client compositor validation:
+
+- ROI compositor was enabled with `GVT_SPICE_VIEWER_ROI_COMPOSITOR=1`.
+- First decoded sample refreshed the full 1920x1200 background cache.
+- Follow-up samples were 128x128 ROI pictures composited at `48,80`.
+- Viewer logs stayed at `drops=0` after the metadata ring-buffer fix.
+
+Global-change validation:
+
+- Triggered Notepad open/maximize through native TCP input while the ROI viewer
+  stayed connected.
+- Evidence directory:
+  `client/build/lowbw-roi-global-trigger-viewer-20260622-0235`
+- Server log shows ROI frames before the large change, then full/global
+  classification:
+  - before trigger: `streamd_encoded=180`, `streamd_roi=177`,
+    `dirty_global=0`
+  - after trigger: `streamd_encoded=240`, `streamd_roi=236`,
+    `dirty_full=4`, `dirty_global=7`
+  - later burst: `dirty_global=9`, followed by static/partial frames
+- Live viewer metadata shows the same transition:
+  - `seq=238 mode=full roi=0 rect=0,0 1920x1200`
+  - `seq=266..272 mode=global roi=0 rect=0,0 1920x1200`
+  - `seq=273` returned to partial ROI
+
+Verification commands added this round:
+
+```powershell
+git -C C:\job\gvt-cloud-current\client diff --check
+git -C C:\job\gvt-cloud-current\server diff --check
+powershell -ExecutionPolicy Bypass -File client\src\build-viewer.ps1
+```
+
+Remote build verification:
+
+```bash
+ninja -C /usr/local/src/project/qemu/build qemu-system-x86_64
+```
+
 ## Commit
 
 - `427a043 Add low bandwidth dirty-region foundation`

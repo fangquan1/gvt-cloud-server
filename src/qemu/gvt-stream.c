@@ -42,6 +42,9 @@
 #define GVT_STREAM_DIRTY_BLOCK_DEFAULT 16u
 #define GVT_STREAM_DIRTY_PARTIAL_PPM_DEFAULT 150000u
 #define GVT_STREAM_DIRTY_GLOBAL_PPM_DEFAULT 350000u
+#define GVT_STREAM_DIRTY_ROI_ALIGN 64u
+#define GVT_STREAM_DIRTY_ROI_MIN_WIDTH 128u
+#define GVT_STREAM_DIRTY_ROI_MIN_HEIGHT 128u
 typedef struct GVTStreamDisplay {
     DisplayChangeListener dcl;
     QemuDmaBuf *scanout;
@@ -1854,6 +1857,62 @@ static int gvt_stream_dirty_target_bitrate(GVTStreamDisplay *gdpy,
     return gdpy->encode_bitrate;
 }
 
+static uint32_t gvt_stream_align_up_u32(uint32_t value, uint32_t align)
+{
+    return align ? ((value + align - 1) / align) * align : value;
+}
+
+static void gvt_stream_dirty_expand_roi_rect(GVTStreamDisplay *gdpy,
+                                             int width,
+                                             int height)
+{
+    uint32_t old_x = gdpy->dirty_x;
+    uint32_t old_y = gdpy->dirty_y;
+    uint32_t old_w = gdpy->dirty_w;
+    uint32_t old_h = gdpy->dirty_h;
+    uint32_t new_w;
+    uint32_t new_h;
+    uint32_t new_x;
+    uint32_t new_y;
+
+    if (!gdpy->low_bandwidth_roi ||
+        gdpy->dirty_mode != GVT_STREAM_DIRTY_PARTIAL ||
+        width <= 0 || height <= 0 ||
+        !gdpy->dirty_w || !gdpy->dirty_h) {
+        return;
+    }
+
+    new_w = MAX(gdpy->dirty_w, GVT_STREAM_DIRTY_ROI_MIN_WIDTH);
+    new_h = MAX(gdpy->dirty_h, GVT_STREAM_DIRTY_ROI_MIN_HEIGHT);
+    new_w = gvt_stream_align_up_u32(new_w, GVT_STREAM_DIRTY_ROI_ALIGN);
+    new_h = gvt_stream_align_up_u32(new_h, GVT_STREAM_DIRTY_ROI_ALIGN);
+    new_w = MIN(new_w, (uint32_t)width);
+    new_h = MIN(new_h, (uint32_t)height);
+
+    new_x = gdpy->dirty_x;
+    new_y = gdpy->dirty_y;
+    if (new_x + new_w > (uint32_t)width) {
+        new_x = (uint32_t)width - new_w;
+    }
+    if (new_y + new_h > (uint32_t)height) {
+        new_y = (uint32_t)height - new_h;
+    }
+
+    gdpy->dirty_x = new_x;
+    gdpy->dirty_y = new_y;
+    gdpy->dirty_w = new_w;
+    gdpy->dirty_h = new_h;
+
+    if (gdpy->verbose &&
+        (old_x != new_x || old_y != new_y ||
+         old_w != new_w || old_h != new_h)) {
+        error_report("gvt-stream: dirty-roi-expand %u,%u %ux%u -> "
+                     "%u,%u %ux%u",
+                     old_x, old_y, old_w, old_h,
+                     new_x, new_y, new_w, new_h);
+    }
+}
+
 static void gvt_stream_update_dirty_state(GVTStreamDisplay *gdpy,
                                           DisplaySurface *surface)
 {
@@ -1985,6 +2044,7 @@ static void gvt_stream_update_dirty_state(GVTStreamDisplay *gdpy,
     }
 
     gdpy->dirty_mode = mode;
+    gvt_stream_dirty_expand_roi_rect(gdpy, width, height);
     gdpy->dirty_changed_pixels = changed_pixels;
     gdpy->dirty_diff_ppm = diff_ppm;
     gdpy->dirty_valid = true;
