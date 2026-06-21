@@ -18,8 +18,8 @@ damage 分类与编码策略基础，不伪造客户端无法理解的局部 RTP
 
 ## 改动摘要
 
-- IPC 升级到 v2，新增 dirty mode、dirty rect、dirty ppm、background sequence 和
-  low-bandwidth flag。
+- IPC 升级到 v3，新增 dirty mode、dirty rect、dirty ppm、background sequence、
+  low-bandwidth flag、ROI flag、RTP byte 计数和 ROI frame 计数。
 - QEMU `gvt-stream` 新增 `GVT_STREAM_LOW_BANDWIDTH=1` 模式：
   - 每帧通过已有 EGL readback surface 做块级 diff。
   - 默认 16x16 block、像素阈值 8。
@@ -34,13 +34,23 @@ damage 分类与编码策略基础，不伪造客户端无法理解的局部 RTP
   - 增加 dirty 分类、bitrate-change、RTP bytes、ROI frame 和静态跳帧观测日志。
 - `gvt-qm-run` 和示例配置暴露低带宽及 ROI 实验参数。
 - `patches/qemu-gvt-stream.patch` 已同步更新。
+- QEMU 在 ROI 模式下通过控制 TCP 给客户端发送 per-frame metadata：
+  `type=frame`、`mode=partial|global|full`、`roi`、`x/y/w/h`、源
+  `width/height`、`dirty_ppm` 和 `background` sequence。
+- 客户端 `gvt_spice_viewer` 新增 opt-in ROI compositor：
+  - `GVT_SPICE_VIEWER_ROI_COMPOSITOR=1` 时，GStreamer 尾部切到
+    `d3d11download ! videoconvert ! video/x-raw,format=BGRA ! appsink`。
+  - full/global sample 刷新客户端内存背景缓存。
+  - ROI sample 依据控制通道 metadata 贴回背景缓存，再由 Win32/GDI 绘制到
+    video child window。
+  - 普通未开启模式仍走原来的 `d3d11videosink` 直显路径。
 
 ## 当前边界
 
 服务端已经具备 opt-in ROI 编码路径：开启 `GVT_STREAM_LOW_BANDWIDTH_ROI=1`
-后，partial candidate 会编码成 dirty-rectangle-sized H.265 picture。当前普通
-viewer 仍然是直接 D3D11 sink，没有背景缓存/合成层，因此默认保持
-`LOW_BANDWIDTH_ROI=0`；真正作为用户可用路径还需要新增客户端 compositor。
+后，partial candidate 会编码成 dirty-rectangle-sized H.265 picture。客户端已新增
+opt-in 背景缓存/ROI 合成器，但默认仍保持普通 D3D11 直显；真正作为用户默认路径前，
+还需要在远端跑秒表、小窗口切全屏和长期静态场景，验证带宽下降、画面完整性和切换延迟。
 
 ## 验证
 
@@ -69,6 +79,11 @@ ssh root@192.168.0.188 "chmod +x /tmp/gvt-lowbw-build/scripts/build-gvt-streamd 
 - ROI 版 streamd 临时编译通过，输出 `/tmp/gvt-roi-build/gvt-streamd-roi`。
 - ROI 版 QEMU `gvt-stream.c` 使用远端真实编译参数编译到
   `/tmp/gvt-roi-build/gvt-stream.o` 通过。
+- ROI frame metadata 版 QEMU `gvt-stream.c` 使用远端真实编译参数编译到
+  `/tmp/gvt-roi-meta-build/gvt-stream.o` 通过。
+- 客户端 viewer 本地编译通过，输出
+  `C:\job\gvt-cloud-current\client\build\viewer\gvt_spice_viewer.exe`。
+- 本地 GStreamer 1.18.6 包确认存在 `d3d11download` 和 `appsink` 插件。
 - `gst-inspect-1.0 vaapih265enc` 确认 `bitrate`、`keyframe-period` 和
   `rate-control` 属性存在且可写。
 
@@ -77,16 +92,20 @@ ssh root@192.168.0.188 "chmod +x /tmp/gvt-lowbw-build/scripts/build-gvt-streamd 
 - 未替换远端正在运行的 QEMU/source tree。
 - 未重启 VM。
 - 未做秒表小区域带宽实测和全屏切换实测。
-- 未实现客户端背景缓存/局部帧合成。
+- 未在远端实机上打开 `LOW_BANDWIDTH_ROI=1` +
+  `GVT_SPICE_VIEWER_ROI_COMPOSITOR=1` 做带宽和画面完整性实测。
 
 ## Commit
 
 - `427a043 Add low bandwidth dirty-region foundation`
 - `353596e Add opt-in ROI dirty-region encoding`
+- `c31219c Add ROI frame metadata control messages`
+- 客户端本轮改动：ROI compositor（客户端仓库单独提交）。
 
 ## 下一步
 
 - 在远端可中断窗口部署 `LOW_BANDWIDTH=1`，跑秒表/静态桌面/小窗口切全屏三组带宽对比。
 - 根据日志中的 `dirty=partial|global|static` 和 `dirty_ppm` 调整阈值。
-- 在客户端增加背景缓存和 ROI H.265 小帧合成路径，使
-  `LOW_BANDWIDTH_ROI=1` 可以作为正常观看路径使用。
+- 远端部署本轮服务端和客户端改动，开启 `LOW_BANDWIDTH=1`、
+  `LOW_BANDWIDTH_ROI=1`、`GVT_SPICE_VIEWER_ROI_COMPOSITOR=1`，跑秒表、
+  静态桌面、小窗口切全屏和带宽采样。

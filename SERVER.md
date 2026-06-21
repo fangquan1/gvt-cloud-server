@@ -333,7 +333,7 @@ Experimental low-bandwidth knobs:
   classification in QEMU.
 - `GVT_STREAM_LOW_BANDWIDTH_ROI=1` makes `gvt-streamd` encode only the dirty
   rectangle for partial frames. This produces a small H.265 picture and requires
-  a client compositor; leave it disabled for the current plain RTP viewer.
+  the client ROI compositor path to be enabled.
 - `GVT_STREAM_DIRTY_BLOCK_SIZE=16` controls the diff grid size.
 - `GVT_STREAM_DIRTY_PIXEL_DELTA=8` is the per-channel noise threshold.
 - `GVT_STREAM_DIRTY_PARTIAL_MAX_PPM=150000` marks small changes as partial
@@ -352,9 +352,12 @@ frame, partial candidates are encoded as full-size H.265 pictures at reduced
 VAAPI bitrate, and global changes switch back to full bitrate immediately.
 With `GVT_STREAM_LOW_BANDWIDTH_ROI=1`, partial candidates are encoded as
 dirty-rectangle-sized H.265 pictures by pointing `GstVideoMeta` at the subregion
-inside the source DMABUF. That is the server-side ROI encoder path; it still
-needs a client-side background cache/compositor before it can be used as the
-normal viewer path.
+inside the source DMABUF. QEMU also sends per-frame ROI metadata over the active
+control TCP connection, for example `type=frame`, `mode=partial|global|full`,
+`x/y/w/h`, source `width/height`, `dirty_ppm`, and `background` sequence. The
+client can use that metadata to composite dirty-rectangle pictures over its
+cached full-frame background. Leave ROI disabled unless the matching client
+compositor is enabled for the experiment.
 
 When the client disconnects, the active control connection closes and QEMU
 asks `gvt-streamd` to stop encoding. When the guest display sleeps or scanout

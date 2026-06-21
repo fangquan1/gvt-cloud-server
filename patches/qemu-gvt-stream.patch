@@ -160,10 +160,10 @@ index 0000000..2bfb838
 +#endif /* GVT_STREAM_IPC_H */
 diff --git a/ui/gvt-stream.c b/ui/gvt-stream.c
 new file mode 100644
-index 0000000..af9daf5
+index 0000000..86acc9d
 --- /dev/null
 +++ b/ui/gvt-stream.c
-@@ -0,0 +1,2951 @@
+@@ -0,0 +1,2987 @@
 +/*
 + * GVT-g stream display backend.
 + *
@@ -762,6 +762,41 @@ index 0000000..af9daf5
 +    gvt_stream_external_send_message(gdpy, &msg, -1);
 +}
 +
++static void gvt_stream_control_send_frame_meta(GVTStreamDisplay *gdpy,
++                                               const GVTStreamIpcMessage *msg)
++{
++    GVTStreamControlClient *client = gvt_stream_control_active_client;
++    char message[512];
++    ssize_t ret;
++
++    if (!gdpy || !msg || !client ||
++        !(msg->flags & GVT_STREAM_IPC_FLAG_DIRTY_VALID) ||
++        !(msg->flags & GVT_STREAM_IPC_FLAG_ENCODE_ROI)) {
++        return;
++    }
++
++    snprintf(message, sizeof(message),
++             "{\"type\":\"frame\",\"seq\":%" PRIu64
++             ",\"mode\":\"%s\""
++             ",\"roi\":%d"
++             ",\"x\":%u,\"y\":%u,\"w\":%u,\"h\":%u"
++             ",\"width\":%u,\"height\":%u"
++             ",\"dirty_ppm\":%u"
++             ",\"background\":%" PRIu64 "}\n",
++             msg->seq,
++             gvt_stream_dirty_mode_name(msg->dirty_mode),
++             msg->dirty_mode == GVT_STREAM_DIRTY_PARTIAL,
++             msg->dirty_x, msg->dirty_y, msg->dirty_w, msg->dirty_h,
++             msg->width, msg->height, msg->dirty_ppm,
++             msg->background_seq);
++
++    ret = send(client->fd, message, strlen(message), MSG_NOSIGNAL);
++    if (ret < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
++        warn_report("gvt-stream-control: frame-meta send failed: %s",
++                    strerror(errno));
++    }
++}
++
 +static void gvt_stream_external_send_no_scanout(GVTStreamDisplay *gdpy,
 +                                                int64_t now_ms)
 +{
@@ -864,6 +899,7 @@ index 0000000..af9daf5
 +
 +    ok = gvt_stream_external_send_message(gdpy, &msg, fds[0]);
 +    if (ok) {
++        gvt_stream_control_send_frame_meta(gdpy, &msg);
 +        gdpy->external_frame_count++;
 +        if (gdpy->verbose || gdpy->external_frame_count <= 5 ||
 +            gdpy->external_frame_count % 60 == 0) {
