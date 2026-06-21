@@ -214,7 +214,7 @@ export GVT_STREAMD_SOCKET=/root/qemu_cmd/win10-gvt-streamd.sock
 /usr/local/src/project/qemu/build/qemu-system-x86_64 \
   --nodefaults -enable-kvm -cpu host -m 4096 -smp 4 -boot order=c \
   -display gvt-stream,rendernode=/dev/dri/renderD128,codec=h265,port=5004 \
-  -spice port=5900,addr=0.0.0.0,disable-ticketing=on,agent-mouse=off,playback-compression=off,streaming-video=off,image-compression=off,disable-copy-paste=on,disable-agent-file-xfer=on,display=none \
+  -spice port=5900,addr=0.0.0.0,disable-ticketing=on,agent-mouse=off,playback-compression=off,streaming-video=off,image-compression=off,display=none \
   -device vfio-pci-nohotplug,sysfsdev=/sys/bus/pci/devices/0000:00:02.0/<VGPU_UUID>,display=on,x-igd-opregion=on,ramfb=on \
   -hda /path/to/win10.qcow2 \
   -netdev tap,id=net0,ifname=tap-win10,script=no,downscript=no \
@@ -223,6 +223,8 @@ export GVT_STREAMD_SOCKET=/root/qemu_cmd/win10-gvt-streamd.sock
   -device virtio-serial-pci \
   -chardev socket,path=/root/qemu_cmd/win10-gvt-stream-qga.sock,server=on,wait=off,id=qga0 \
   -device virtserialport,chardev=qga0,name=org.qemu.guest_agent.0 \
+  -chardev spicevmc,id=vdagent0,name=vdagent \
+  -device virtserialport,chardev=vdagent0,name=com.redhat.spice.0 \
   -audiodev spice,id=audio0,timer-period=5000,out.frequency=48000,out.channels=2,out.format=s16,out.buffer-length=100000 \
   -device ich9-intel-hda \
   -device hda-duplex,audiodev=audio0 \
