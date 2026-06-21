@@ -100,7 +100,7 @@ ssh root@192.168.0.188 "chmod +x /tmp/gvt-lowbw-build/scripts/build-gvt-streamd 
 - `427a043 Add low bandwidth dirty-region foundation`
 - `353596e Add opt-in ROI dirty-region encoding`
 - `4e897f2 Add ROI frame metadata control messages`
-- 客户端本轮改动：ROI compositor（客户端仓库单独提交）。
+- 客户端本轮改动：`2f54b61 Add opt-in ROI compositor`
 
 ## 下一步
 
