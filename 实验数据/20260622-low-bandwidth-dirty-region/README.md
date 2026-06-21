@@ -82,6 +82,7 @@ ssh root@192.168.0.188 "chmod +x /tmp/gvt-lowbw-build/scripts/build-gvt-streamd 
 ## Commit
 
 - `427a043 Add low bandwidth dirty-region foundation`
+- `353596e Add opt-in ROI dirty-region encoding`
 
 ## 下一步
 
