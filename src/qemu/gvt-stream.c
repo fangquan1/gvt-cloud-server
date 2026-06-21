@@ -39,8 +39,6 @@
 #define GVT_STREAM_FOURCC_XR24 0x34325258u
 #define GVT_STREAM_WAKE_PUMP_NO_SCANOUT_MS 5000u
 #define GVT_STREAM_WAKE_PUMP_SUSPENDED_MS 45000u
-#define GVT_STREAM_LOG_EARLY_FRAMES 5u
-#define GVT_STREAM_LOG_EVERY_FRAMES 300u
 typedef struct GVTStreamDisplay {
     DisplayChangeListener dcl;
     QemuDmaBuf *scanout;
@@ -106,7 +104,6 @@ typedef struct GVTStreamDisplay {
     uint64_t external_seq;
     uint64_t external_frame_count;
     uint64_t external_no_scanout_count;
-    uint64_t external_throttle_count;
     uint64_t external_send_fail_count;
     uint64_t external_connect_fail_count;
     int64_t external_last_connect_warn_ms;
@@ -248,7 +245,6 @@ static uint64_t gvt_stream_effective_capture_ms(GVTStreamDisplay *gdpy,
 {
     int64_t last_activity_ms = gvt_stream_last_activity_ms(gdpy);
     uint64_t capture_ms = gdpy->capture_ms;
-    uint64_t fps_capture_ms;
 
     if (gdpy->idle_capture_ms > gdpy->capture_ms &&
         gdpy->idle_after_ms && last_activity_ms &&
@@ -256,28 +252,7 @@ static uint64_t gvt_stream_effective_capture_ms(GVTStreamDisplay *gdpy,
         capture_ms = gdpy->idle_capture_ms;
     }
 
-    if (gdpy->encode_fps > 0) {
-        fps_capture_ms = (1000 + (uint64_t)gdpy->encode_fps - 1) /
-                         (uint64_t)gdpy->encode_fps;
-        if (fps_capture_ms > capture_ms) {
-            capture_ms = fps_capture_ms;
-        }
-    }
-
     return capture_ms;
-}
-
-static uint64_t gvt_stream_effective_pump_interval_ms(GVTStreamDisplay *gdpy,
-                                                      int64_t now_ms)
-{
-    uint64_t interval_ms = gdpy->startup_pump_interval_ms ?:
-                           gvt_stream_effective_capture_ms(gdpy, now_ms);
-    uint64_t effective_ms = gvt_stream_effective_capture_ms(gdpy, now_ms);
-
-    if (effective_ms > interval_ms) {
-        interval_ms = effective_ms;
-    }
-    return interval_ms ?: 17;
 }
 
 static int64_t gvt_stream_last_activity_ms(GVTStreamDisplay *gdpy)
@@ -581,9 +556,8 @@ static void gvt_stream_external_send_no_scanout(GVTStreamDisplay *gdpy,
                                     now_ms);
     if (gvt_stream_external_send_message(gdpy, &msg, -1)) {
         gdpy->external_no_scanout_count++;
-        if (gdpy->verbose ||
-            gdpy->external_no_scanout_count <= GVT_STREAM_LOG_EARLY_FRAMES ||
-            gdpy->external_no_scanout_count % GVT_STREAM_LOG_EVERY_FRAMES == 0) {
+        if (gdpy->verbose || gdpy->external_no_scanout_count <= 5 ||
+            gdpy->external_no_scanout_count % 60 == 0) {
             error_report("gvt-stream-external: no-scanout #%" PRIu64
                          " seq=%" PRIu64,
                          gdpy->external_no_scanout_count, msg.seq);
@@ -645,9 +619,8 @@ static bool gvt_stream_external_send_frame(GVTStreamDisplay *gdpy,
     ok = gvt_stream_external_send_message(gdpy, &msg, fds[0]);
     if (ok) {
         gdpy->external_frame_count++;
-        if (gdpy->verbose ||
-            gdpy->external_frame_count <= GVT_STREAM_LOG_EARLY_FRAMES ||
-            gdpy->external_frame_count % GVT_STREAM_LOG_EVERY_FRAMES == 0) {
+        if (gdpy->verbose || gdpy->external_frame_count <= 5 ||
+            gdpy->external_frame_count % 60 == 0) {
             error_report("gvt-stream-external: frame-sent #%" PRIu64
                          " seq=%" PRIu64 " fd=%d size=%ux%u stride=%u "
                          "modifier=0x%016" PRIx64,
@@ -1859,9 +1832,6 @@ static void gvt_stream_capture_frame(GVTStreamDisplay *gdpy, int64_t now_ms)
     capture_ms = gvt_stream_effective_capture_ms(gdpy, now_ms);
     if (gdpy->last_capture_ms &&
         now_ms - gdpy->last_capture_ms < capture_ms) {
-        if (stream_active) {
-            gdpy->external_throttle_count++;
-        }
         return;
     }
 
@@ -2018,7 +1988,11 @@ static void gvt_stream_startup_pump_cb(void *opaque)
         return;
     }
 
-    interval_ms = gvt_stream_effective_pump_interval_ms(gdpy, now_ms);
+    interval_ms = gdpy->startup_pump_interval_ms ?:
+                  gvt_stream_effective_capture_ms(gdpy, now_ms);
+    if (!interval_ms) {
+        interval_ms = 17;
+    }
     timer_mod(gdpy->startup_pump_timer, now_ms + interval_ms);
 }
 
@@ -2032,7 +2006,11 @@ static void gvt_stream_startup_pump_arm(GVTStreamDisplay *gdpy,
         return;
     }
 
-    interval_ms = gvt_stream_effective_pump_interval_ms(gdpy, now_ms);
+    interval_ms = gdpy->startup_pump_interval_ms ?:
+                  gvt_stream_effective_capture_ms(gdpy, now_ms);
+    if (!interval_ms) {
+        interval_ms = 17;
+    }
     until_ms = now_ms + gdpy->startup_pump_ms;
     if (gdpy->startup_pump_until_ms > until_ms) {
         until_ms = gdpy->startup_pump_until_ms;
@@ -2249,7 +2227,6 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      " dmabuf=%" PRIu64 " cpu=%" PRIu64
                      " external=%d external_sent=%" PRIu64
                      " external_no_scanout=%" PRIu64
-                     " external_throttled=%" PRIu64
                      " external_send_failures=%" PRIu64
                      " streamd_encoded=%" PRIu64
                      " streamd_failures=%" PRIu64
@@ -2269,7 +2246,6 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      (uint64_t)0, (uint64_t)0,
                      1, gdpy->external_frame_count,
                      gdpy->external_no_scanout_count,
-                     gdpy->external_throttle_count,
                      gdpy->external_send_fail_count,
                      gdpy->external_encoded,
                      gdpy->external_encode_failures,

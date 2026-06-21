@@ -32,9 +32,6 @@
 
 #define GVT_STREAMD_DEFAULT_SOCKET "/tmp/gvt-streamd.sock"
 #define GVT_STREAMD_FOURCC_XR24 0x34325258u
-#define GVT_STREAMD_LOG_EARLY_FRAMES 5u
-#define GVT_STREAMD_LOG_EVERY_FRAMES 300u
-#define GVT_STREAMD_STATS_EVERY_FRAMES 60u
 
 typedef struct GVTStreamd {
     char *socket_path;
@@ -474,8 +471,7 @@ static bool streamd_should_push_frame(GVTStreamd *s,
     }
 
     s->dropped_frames++;
-    if (s->dropped_frames <= GVT_STREAMD_LOG_EARLY_FRAMES ||
-        s->dropped_frames % GVT_STREAMD_LOG_EVERY_FRAMES == 0) {
+    if (s->dropped_frames <= 5 || s->dropped_frames % 60 == 0) {
         g_printerr("gvt-streamd: frame-drop #=%" PRIu64
                    " source=%s target_fps=%u next_due_ms=%" PRIu64
                    " frame_ms=%" PRIu64 " encoded=%" PRIu64 "\n",
@@ -581,17 +577,13 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
     if (!g_strcmp0(source, "cached")) {
         s->cached_frames++;
     }
-    if (s->frames <= GVT_STREAMD_LOG_EARLY_FRAMES ||
-        s->frames % GVT_STREAMD_LOG_EVERY_FRAMES == 0) {
+    if (s->frames <= 5 || s->frames % 60 == 0) {
         g_printerr("gvt-streamd: dmabuf-push-ok #=%" PRIu64
                    " source=%s size=%ux%u stride=%u cached=%" PRIu64
                    " dropped=%" PRIu64 " failures=%" PRIu64 "\n",
-                    s->frames, source ?: "live", msg->width, msg->height,
-                    msg->stride, s->cached_frames, s->dropped_frames,
-                    s->failures);
-    }
-    if (s->frames <= GVT_STREAMD_LOG_EARLY_FRAMES ||
-        s->frames % GVT_STREAMD_STATS_EVERY_FRAMES == 0) {
+                   s->frames, source ?: "live", msg->width, msg->height,
+                   msg->stride, s->cached_frames, s->dropped_frames,
+                   s->failures);
         streamd_send_stats(s);
     }
     return true;
@@ -654,8 +646,7 @@ static void streamd_apply_no_scanout(GVTStreamd *s,
     if (s->last_fd >= 0) {
         streamd_push_dmabuf(s, &s->last_meta, -1, "cached");
     }
-    if (s->no_scanout <= GVT_STREAMD_LOG_EARLY_FRAMES ||
-        s->no_scanout % GVT_STREAMD_LOG_EVERY_FRAMES == 0) {
+    if (s->no_scanout <= 5 || s->no_scanout % 60 == 0) {
         g_printerr("gvt-streamd: no-scanout #%" PRIu64
                    " has_cached=%d frames=%" PRIu64 "\n",
                    s->no_scanout, s->last_fd >= 0, s->frames);
