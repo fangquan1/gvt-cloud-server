@@ -47,6 +47,11 @@
 #define GVT_STREAM_DIRTY_ROI_ALIGN 64u
 #define GVT_STREAM_DIRTY_ROI_MIN_WIDTH 128u
 #define GVT_STREAM_DIRTY_ROI_MIN_HEIGHT 128u
+#define GVT_STREAM_DIRTY_ROI_PADDING_DEFAULT 64u
+#define GVT_STREAM_DIRTY_DYNAMIC_MIN_PPM_DEFAULT 50000u
+#define GVT_STREAM_DIRTY_DYNAMIC_RECT_PPM_DEFAULT 80000u
+#define GVT_STREAM_DIRTY_DYNAMIC_GLOBAL_FRAMES_DEFAULT 18u
+#define GVT_STREAM_DIRTY_DYNAMIC_PARTIAL_FRAMES_DEFAULT 2u
 #define GVT_STREAM_INPUT_REFRESH_FRAMES_DEFAULT 30u
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -114,8 +119,15 @@ typedef struct GVTStreamDisplay {
     uint64_t dirty_global_min_ppm;
     uint64_t dirty_global_burst_frames;
     uint64_t dirty_global_frames_left;
+    uint64_t dirty_dynamic_min_ppm;
+    uint64_t dirty_dynamic_rect_ppm;
+    uint64_t dirty_dynamic_global_frames;
+    uint64_t dirty_dynamic_partial_frames;
+    uint64_t dirty_partial_streak;
+    uint64_t dirty_dynamic_global_count;
     uint64_t dirty_input_refresh_frames;
     uint64_t dirty_input_refresh_frames_left;
+    uint32_t dirty_roi_padding;
     uint32_t dirty_gpu_sample_block_size;
     uint64_t dirty_gpu_sample_pixel_delta;
     bool dirty_gpu_sample_prev_valid;
@@ -2090,6 +2102,7 @@ static void gvt_stream_dirty_reset(GVTStreamDisplay *gdpy)
     gdpy->dirty_rect_ppm = 0;
     gdpy->dirty_global_frames_left = 0;
     gdpy->dirty_input_refresh_frames_left = 0;
+    gdpy->dirty_partial_streak = 0;
     gdpy->dirty_gpu_sample_prev_valid = false;
     gdpy->dirty_gpu_sample_prev_width = 0;
     gdpy->dirty_gpu_sample_prev_height = 0;
@@ -2170,10 +2183,15 @@ static void gvt_stream_dirty_expand_roi_rect(GVTStreamDisplay *gdpy,
     uint32_t old_y = gdpy->dirty_y;
     uint32_t old_w = gdpy->dirty_w;
     uint32_t old_h = gdpy->dirty_h;
+    uint32_t pad = gdpy->dirty_roi_padding;
     uint32_t new_w;
     uint32_t new_h;
     uint32_t new_x;
     uint32_t new_y;
+    uint64_t center_x;
+    uint64_t center_y;
+    uint64_t padded_w;
+    uint64_t padded_h;
 
     if (!gdpy->low_bandwidth_roi ||
         gdpy->dirty_mode != GVT_STREAM_DIRTY_PARTIAL ||
@@ -2182,15 +2200,21 @@ static void gvt_stream_dirty_expand_roi_rect(GVTStreamDisplay *gdpy,
         return;
     }
 
-    new_w = MAX(gdpy->dirty_w, GVT_STREAM_DIRTY_ROI_MIN_WIDTH);
-    new_h = MAX(gdpy->dirty_h, GVT_STREAM_DIRTY_ROI_MIN_HEIGHT);
+    padded_w = (uint64_t)gdpy->dirty_w + (uint64_t)pad * 2u;
+    padded_h = (uint64_t)gdpy->dirty_h + (uint64_t)pad * 2u;
+    new_w = MAX((uint32_t)MIN(padded_w, (uint64_t)UINT32_MAX),
+                GVT_STREAM_DIRTY_ROI_MIN_WIDTH);
+    new_h = MAX((uint32_t)MIN(padded_h, (uint64_t)UINT32_MAX),
+                GVT_STREAM_DIRTY_ROI_MIN_HEIGHT);
     new_w = gvt_stream_align_up_u32(new_w, GVT_STREAM_DIRTY_ROI_ALIGN);
     new_h = gvt_stream_align_up_u32(new_h, GVT_STREAM_DIRTY_ROI_ALIGN);
     new_w = MIN(new_w, (uint32_t)width);
     new_h = MIN(new_h, (uint32_t)height);
 
-    new_x = gdpy->dirty_x;
-    new_y = gdpy->dirty_y;
+    center_x = (uint64_t)gdpy->dirty_x + gdpy->dirty_w / 2u;
+    center_y = (uint64_t)gdpy->dirty_y + gdpy->dirty_h / 2u;
+    new_x = center_x > new_w / 2u ? (uint32_t)(center_x - new_w / 2u) : 0u;
+    new_y = center_y > new_h / 2u ? (uint32_t)(center_y - new_h / 2u) : 0u;
     if (new_x + new_w > (uint32_t)width) {
         new_x = (uint32_t)width - new_w;
     }
@@ -2247,6 +2271,8 @@ static void gvt_stream_dirty_apply_change(GVTStreamDisplay *gdpy,
     uint64_t diff_ppm;
     uint64_t rect_ppm = 0;
     uint32_t mode;
+    bool partial_candidate;
+    bool dynamic_candidate;
 
     diff_ppm = total_pixels ?
         changed_pixels * 1000000ULL / total_pixels : 1000000ULL;
@@ -2256,9 +2282,27 @@ static void gvt_stream_dirty_apply_change(GVTStreamDisplay *gdpy,
             rect_pixels * 1000000ULL / total_pixels : 1000000ULL;
     }
 
+    partial_candidate = changed_pixels &&
+        diff_ppm <= gdpy->dirty_partial_max_ppm &&
+        rect_ppm <= gdpy->dirty_partial_rect_max_ppm;
+    if (partial_candidate) {
+        gdpy->dirty_partial_streak++;
+    } else {
+        gdpy->dirty_partial_streak = 0;
+    }
+    dynamic_candidate = gdpy->low_bandwidth_roi && partial_candidate &&
+        ((gdpy->dirty_dynamic_min_ppm &&
+          diff_ppm >= gdpy->dirty_dynamic_min_ppm) ||
+         (gdpy->dirty_dynamic_rect_ppm &&
+          rect_ppm >= gdpy->dirty_dynamic_rect_ppm) ||
+         (gdpy->dirty_dynamic_partial_frames &&
+          gdpy->dirty_partial_streak >=
+              gdpy->dirty_dynamic_partial_frames));
+
     if (gdpy->dirty_input_refresh_frames_left) {
         mode = GVT_STREAM_DIRTY_GLOBAL;
         gdpy->dirty_input_refresh_frames_left--;
+        gdpy->dirty_partial_streak = 0;
         gdpy->dirty_background_seq++;
         gdpy->dirty_global_count++;
         gdpy->dirty_x = 0;
@@ -2267,6 +2311,7 @@ static void gvt_stream_dirty_apply_change(GVTStreamDisplay *gdpy,
         gdpy->dirty_h = height;
     } else if (!changed_pixels) {
         mode = GVT_STREAM_DIRTY_STATIC;
+        gdpy->dirty_partial_streak = 0;
         gdpy->dirty_x = 0;
         gdpy->dirty_y = 0;
         gdpy->dirty_w = 0;
@@ -2277,6 +2322,7 @@ static void gvt_stream_dirty_apply_change(GVTStreamDisplay *gdpy,
         gdpy->dirty_global_frames_left =
             gdpy->dirty_global_burst_frames > 1 ?
             gdpy->dirty_global_burst_frames - 1 : 0;
+        gdpy->dirty_partial_streak = 0;
         gdpy->dirty_background_seq++;
         gdpy->dirty_global_count++;
         gdpy->dirty_x = 0;
@@ -2286,13 +2332,26 @@ static void gvt_stream_dirty_apply_change(GVTStreamDisplay *gdpy,
     } else if (gdpy->dirty_global_frames_left) {
         mode = GVT_STREAM_DIRTY_GLOBAL;
         gdpy->dirty_global_frames_left--;
+        gdpy->dirty_partial_streak = 0;
         gdpy->dirty_global_count++;
         gdpy->dirty_x = 0;
         gdpy->dirty_y = 0;
         gdpy->dirty_w = width;
         gdpy->dirty_h = height;
-    } else if (diff_ppm <= gdpy->dirty_partial_max_ppm &&
-               rect_ppm <= gdpy->dirty_partial_rect_max_ppm) {
+    } else if (dynamic_candidate) {
+        mode = GVT_STREAM_DIRTY_GLOBAL;
+        gdpy->dirty_global_frames_left =
+            gdpy->dirty_dynamic_global_frames > 1 ?
+            gdpy->dirty_dynamic_global_frames - 1 : 0;
+        gdpy->dirty_partial_streak = 0;
+        gdpy->dirty_background_seq++;
+        gdpy->dirty_global_count++;
+        gdpy->dirty_dynamic_global_count++;
+        gdpy->dirty_x = 0;
+        gdpy->dirty_y = 0;
+        gdpy->dirty_w = width;
+        gdpy->dirty_h = height;
+    } else if (partial_candidate) {
         mode = GVT_STREAM_DIRTY_PARTIAL;
         gdpy->dirty_partial_count++;
         gdpy->dirty_x = min_x;
@@ -2305,6 +2364,7 @@ static void gvt_stream_dirty_apply_change(GVTStreamDisplay *gdpy,
         gdpy->dirty_global_frames_left =
             gdpy->dirty_global_burst_frames > 1 ?
             gdpy->dirty_global_burst_frames - 1 : 0;
+        gdpy->dirty_partial_streak = 0;
         gdpy->dirty_background_seq++;
         gdpy->dirty_global_count++;
         gdpy->dirty_x = 0;
@@ -2313,6 +2373,7 @@ static void gvt_stream_dirty_apply_change(GVTStreamDisplay *gdpy,
         gdpy->dirty_h = height;
     } else {
         mode = GVT_STREAM_DIRTY_FULL;
+        gdpy->dirty_partial_streak = 0;
         gdpy->dirty_full_count++;
         gdpy->dirty_x = 0;
         gdpy->dirty_y = 0;
@@ -3228,6 +3289,8 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      " dirty_partial=%" PRIu64 " dirty_full=%" PRIu64
                      " dirty_global=%" PRIu64 " dirty_skipped=%" PRIu64
                      " dirty_roi=%" PRIu64
+                     " dirty_dynamic_global=%" PRIu64
+                     " dirty_partial_streak=%" PRIu64
                      " dirty_gpu_sample=%" PRIu64
                      " dirty_gpu_sample_bytes=%" PRIu64
                      " dirty_gpu_roi=%" PRIu64
@@ -3264,6 +3327,8 @@ static void gvt_stream_gl_update(DisplayChangeListener *dcl,
                      gdpy->dirty_full_count, gdpy->dirty_global_count,
                      gdpy->dirty_skip_count,
                      gdpy->dirty_roi_count,
+                     gdpy->dirty_dynamic_global_count,
+                     gdpy->dirty_partial_streak,
                      gdpy->dirty_gpu_sample_frames,
                      gdpy->dirty_gpu_sample_readback_bytes,
                      gdpy->dirty_gpu_roi_frames,
@@ -3445,6 +3510,26 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->dirty_global_burst_frames =
             gvt_stream_getenv_u64("GVT_STREAM_DIRTY_GLOBAL_BURST_FRAMES",
                                   2, 1, 10);
+        gdpy->dirty_dynamic_min_ppm =
+            gvt_stream_getenv_u64("GVT_STREAM_DIRTY_DYNAMIC_MIN_PPM",
+                                  GVT_STREAM_DIRTY_DYNAMIC_MIN_PPM_DEFAULT,
+                                  0, 1000000);
+        gdpy->dirty_dynamic_rect_ppm =
+            gvt_stream_getenv_u64("GVT_STREAM_DIRTY_DYNAMIC_RECT_PPM",
+                                  GVT_STREAM_DIRTY_DYNAMIC_RECT_PPM_DEFAULT,
+                                  0, 1000000);
+        gdpy->dirty_dynamic_global_frames =
+            gvt_stream_getenv_u64("GVT_STREAM_DIRTY_DYNAMIC_GLOBAL_FRAMES",
+                                  GVT_STREAM_DIRTY_DYNAMIC_GLOBAL_FRAMES_DEFAULT,
+                                  1, 120);
+        gdpy->dirty_dynamic_partial_frames =
+            gvt_stream_getenv_u64("GVT_STREAM_DIRTY_DYNAMIC_PARTIAL_FRAMES",
+                                  GVT_STREAM_DIRTY_DYNAMIC_PARTIAL_FRAMES_DEFAULT,
+                                  0, 120);
+        gdpy->dirty_roi_padding =
+            gvt_stream_getenv_u64("GVT_STREAM_DIRTY_ROI_PADDING",
+                                  GVT_STREAM_DIRTY_ROI_PADDING_DEFAULT,
+                                  0, 512);
         gdpy->dirty_input_refresh_frames =
             gvt_stream_getenv_u64("GVT_STREAM_INPUT_REFRESH_FRAMES",
                                   GVT_STREAM_INPUT_REFRESH_FRAMES_DEFAULT,
@@ -3568,6 +3653,11 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      " dirty_partial_rect_ppm=%" PRIu64
                      " dirty_global_ppm=%" PRIu64
                      " dirty_global_burst=%" PRIu64
+                     " dirty_dynamic_min_ppm=%" PRIu64
+                     " dirty_dynamic_rect_ppm=%" PRIu64
+                     " dirty_dynamic_frames=%" PRIu64
+                     " dirty_dynamic_partial_frames=%" PRIu64
+                     " dirty_roi_padding=%u"
                      " input_refresh_frames=%" PRIu64 " "
                      "capture_dir=%s capture_ms=%" PRIu64 " idle_capture_ms=%" PRIu64
                      " idle_after_ms=%" PRIu64 " idle_probe_ms=%" PRIu64
@@ -3590,6 +3680,11 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      gdpy->dirty_partial_rect_max_ppm,
                      gdpy->dirty_global_min_ppm,
                      gdpy->dirty_global_burst_frames,
+                     gdpy->dirty_dynamic_min_ppm,
+                     gdpy->dirty_dynamic_rect_ppm,
+                     gdpy->dirty_dynamic_global_frames,
+                     gdpy->dirty_dynamic_partial_frames,
+                     gdpy->dirty_roi_padding,
                      gdpy->dirty_input_refresh_frames,
                      gdpy->capture_dir ?: "", gdpy->capture_ms,
                      gdpy->idle_capture_ms,

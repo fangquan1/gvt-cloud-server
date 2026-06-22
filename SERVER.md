@@ -348,6 +348,15 @@ Experimental low-bandwidth knobs:
   changes back to global mode.
 - `GVT_STREAM_DIRTY_GLOBAL_BURST_FRAMES=2` keeps global mode for a short burst
   after a large change.
+- `GVT_STREAM_DIRTY_DYNAMIC_MIN_PPM=50000`,
+  `GVT_STREAM_DIRTY_DYNAMIC_RECT_PPM=80000`,
+  `GVT_STREAM_DIRTY_DYNAMIC_PARTIAL_FRAMES=2`, and
+  `GVT_STREAM_DIRTY_DYNAMIC_GLOBAL_FRAMES=18` protect video/window-animation
+  scenes from ROI patch seams by promoting sustained or visually large partial
+  candidates to full-frame global mode for a short window.
+- `GVT_STREAM_DIRTY_ROI_PADDING=64` expands partial rectangles before ROI
+  encoding so small text/counter updates are not encoded right on the visible
+  patch boundary.
 - `GVT_STREAM_ENCODE_STILL_BITRATE` optionally overrides the low-bandwidth
   small-dirty-region bitrate. If unset, QEMU uses about 35% of the requested
   bitrate when low-bandwidth mode is enabled.
@@ -363,7 +372,11 @@ control TCP connection, for example `type=frame`, `mode=partial|global|full`,
 `x/y/w/h`, source `width/height`, `dirty_ppm`, and `background` sequence. The
 client can use that metadata to composite dirty-rectangle pictures over its
 cached full-frame background. Leave ROI disabled unless the matching client
-compositor is enabled for the experiment.
+compositor is enabled for the experiment. ROI mode is intentionally limited to
+small, sparse changes; video playback and window animations should promote to
+global/full-frame mode because Sunshine-style streaming keeps a full-frame video
+timeline and uses damage mostly to skip redundant frames, while ROI video
+patching can expose visible seams.
 
 When the client disconnects, the active control connection closes and QEMU
 asks `gvt-streamd` to stop encoding. When the guest display sleeps or scanout
