@@ -28,11 +28,13 @@
 #include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
 #include <gst/video/video.h>
+#include <gst/video/video-event.h>
 
 #include "../qemu/gvt-stream-ipc.h"
 
 #define GVT_STREAMD_DEFAULT_SOCKET "/tmp/gvt-streamd.sock"
 #define GVT_STREAMD_FOURCC_XR24 0x34325258u
+#define GVT_STREAMD_DYNAMIC_FORCE_KEY_UNIT_MS_DEFAULT 1000u
 
 typedef struct GVTStreamd {
     char *socket_path;
@@ -85,6 +87,13 @@ typedef struct GVTStreamd {
     uint64_t bitrate_changes;
     uint64_t rtp_bytes;
     uint64_t roi_frames;
+    uint64_t dynamic_force_key_unit_ms;
+    uint64_t force_key_unit_requests;
+    uint64_t force_key_unit_failures;
+    int64_t last_force_key_unit_ms;
+    int64_t last_frame_wall_ms;
+    uint32_t last_dirty_mode;
+    bool last_dirty_valid;
 } GVTStreamd;
 
 typedef struct StreamdFrameRect {
@@ -100,6 +109,34 @@ static volatile sig_atomic_t stop_requested;
 static int64_t streamd_now_ms(void)
 {
     return g_get_monotonic_time() / 1000;
+}
+
+static uint64_t streamd_getenv_u64(const char *name, uint64_t defval,
+                                   uint64_t minval, uint64_t maxval)
+{
+    const char *value = g_getenv(name);
+    char *end = NULL;
+    guint64 parsed;
+
+    if (!value || !*value) {
+        return defval;
+    }
+
+    errno = 0;
+    parsed = g_ascii_strtoull(value, &end, 10);
+    if (errno || end == value || (end && *end)) {
+        g_printerr("gvt-streamd: invalid %s=%s, using %" PRIu64 "\n",
+                   name, value, defval);
+        return defval;
+    }
+
+    if (parsed < minval) {
+        return minval;
+    }
+    if (parsed > maxval) {
+        return maxval;
+    }
+    return parsed;
 }
 
 static void streamd_signal_handler(int sig)
@@ -517,6 +554,100 @@ static void streamd_note_dirty_frame(GVTStreamd *s,
     }
 }
 
+static bool streamd_dirty_mode_resets_reference(uint32_t mode)
+{
+    return mode == GVT_STREAM_DIRTY_GLOBAL ||
+           mode == GVT_STREAM_DIRTY_FULL;
+}
+
+static void streamd_remember_dirty_mode(GVTStreamd *s,
+                                        const GVTStreamIpcMessage *msg)
+{
+    if (!s || !msg || !(msg->flags & GVT_STREAM_IPC_FLAG_DIRTY_VALID)) {
+        return;
+    }
+
+    s->last_dirty_mode = msg->dirty_mode;
+    s->last_dirty_valid = true;
+}
+
+static void streamd_maybe_force_key_unit(GVTStreamd *s,
+                                         const GVTStreamIpcMessage *msg)
+{
+    GstPad *srcpad;
+    GstEvent *event;
+    bool current_resets;
+    bool previous_resets;
+    bool long_frame_gap;
+    int64_t now_ms;
+    guint count;
+    gboolean ok;
+
+    if (!s || !s->appsrc || !msg ||
+        !(msg->flags & GVT_STREAM_IPC_FLAG_DIRTY_VALID) ||
+        !s->dynamic_force_key_unit_ms) {
+        return;
+    }
+
+    now_ms = streamd_now_ms();
+    current_resets = streamd_dirty_mode_resets_reference(msg->dirty_mode);
+    previous_resets = s->last_dirty_valid &&
+        streamd_dirty_mode_resets_reference(s->last_dirty_mode);
+    long_frame_gap = s->last_frame_wall_ms &&
+        now_ms - s->last_frame_wall_ms >=
+            (int64_t)s->dynamic_force_key_unit_ms;
+    if (!current_resets ||
+        (previous_resets && !long_frame_gap) ||
+        (!s->last_dirty_valid && !long_frame_gap)) {
+        return;
+    }
+
+    if (s->last_force_key_unit_ms &&
+        now_ms - s->last_force_key_unit_ms <
+            (int64_t)s->dynamic_force_key_unit_ms) {
+        return;
+    }
+
+    srcpad = gst_element_get_static_pad(s->appsrc, "src");
+    if (!srcpad) {
+        s->force_key_unit_failures++;
+        g_printerr("gvt-streamd: force-key-unit-no-srcpad dirty=%s\n",
+                   streamd_dirty_mode_name(msg->dirty_mode));
+        return;
+    }
+
+    count = (guint)MIN(s->force_key_unit_requests + 1,
+                       (uint64_t)G_MAXUINT);
+    event = gst_video_event_new_downstream_force_key_unit(
+        s->pts, s->pts, s->pts, TRUE, count);
+    ok = gst_pad_push_event(srcpad, event);
+    gst_object_unref(srcpad);
+
+    if (ok) {
+        s->force_key_unit_requests++;
+        s->last_force_key_unit_ms = now_ms;
+        if (s->force_key_unit_requests <= 10 ||
+            s->force_key_unit_requests % 60 == 0) {
+            g_printerr("gvt-streamd: force-key-unit #=%" PRIu64
+                       " dirty=%s previous=%s pts=%" GST_TIME_FORMAT
+                       " interval_ms=%" PRIu64 " frame_gap_ms=%" PRId64 "\n",
+                       s->force_key_unit_requests,
+                       streamd_dirty_mode_name(msg->dirty_mode),
+                       streamd_dirty_mode_name(s->last_dirty_mode),
+                       GST_TIME_ARGS(s->pts),
+                       s->dynamic_force_key_unit_ms,
+                       s->last_frame_wall_ms ?
+                           now_ms - s->last_frame_wall_ms : -1);
+        }
+    } else {
+        s->force_key_unit_failures++;
+        g_printerr("gvt-streamd: force-key-unit-failed dirty=%s "
+                   "failures=%" PRIu64 "\n",
+                   streamd_dirty_mode_name(msg->dirty_mode),
+                   s->force_key_unit_failures);
+    }
+}
+
 static void streamd_apply_frame_policy(GVTStreamd *s,
                                        const GVTStreamIpcMessage *msg)
 {
@@ -746,6 +877,7 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
             close(fd);
         }
         streamd_note_dirty_frame(s, msg);
+        streamd_remember_dirty_mode(s, msg);
         return true;
     }
 
@@ -836,6 +968,7 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
     }
 
     streamd_apply_frame_policy(s, msg);
+    streamd_maybe_force_key_unit(s, msg);
     streamd_stamp_buffer(s, buf);
 
     flow = gst_app_src_push_buffer(GST_APP_SRC(s->appsrc), buf);
@@ -848,6 +981,8 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
     }
 
     s->frames++;
+    s->last_frame_wall_ms = streamd_now_ms();
+    streamd_remember_dirty_mode(s, msg);
     if (rect.roi) {
         s->roi_frames++;
     }
@@ -887,6 +1022,14 @@ static void streamd_apply_start(GVTStreamd *s, const GVTStreamIpcMessage *msg)
     s->rtp_port = msg->rtp_port;
     s->rtp_fec = msg->rtp_fec;
     s->rtp_fec_important = msg->rtp_fec_important;
+    s->dynamic_force_key_unit_ms =
+        streamd_getenv_u64("GVT_STREAMD_DYNAMIC_FORCE_KEY_UNIT_MS",
+                           GVT_STREAMD_DYNAMIC_FORCE_KEY_UNIT_MS_DEFAULT,
+                           0, 60000);
+    s->last_force_key_unit_ms = 0;
+    s->last_frame_wall_ms = 0;
+    s->last_dirty_valid = false;
+    s->last_dirty_mode = GVT_STREAM_DIRTY_UNKNOWN;
     g_strlcpy(s->host, msg->host, sizeof(s->host));
     g_strlcpy(s->codec, msg->codec[0] ? msg->codec : "h265",
               sizeof(s->codec));
@@ -900,10 +1043,11 @@ static void streamd_apply_start(GVTStreamd *s, const GVTStreamIpcMessage *msg)
     streamd_encoder_finish(s);
     g_printerr("gvt-streamd: start #%" PRIu64 " target=%s:%u codec=%s "
                "fps=%u bitrate=%u still_bitrate=%u keyint=%u mtu=%u "
-               "fec=%u/%u flags=0x%x roi=%d\n",
+               "fec=%u/%u flags=0x%x roi=%d force_key_unit_ms=%" PRIu64 "\n",
                s->starts, s->host, s->rtp_port, s->codec, s->fps,
                s->bitrate, s->still_bitrate, s->keyint, s->mtu, s->rtp_fec,
-               s->rtp_fec_important, s->flags, s->roi_enabled);
+               s->rtp_fec_important, s->flags, s->roi_enabled,
+               s->dynamic_force_key_unit_ms);
 }
 
 static void streamd_apply_stop(GVTStreamd *s)
@@ -917,11 +1061,14 @@ static void streamd_apply_stop(GVTStreamd *s)
                " dirty_partial=%" PRIu64 " dirty_full=%" PRIu64
                " dirty_global=%" PRIu64 " roi_frames=%" PRIu64
                " rtp_bytes=%" PRIu64 " bitrate_changes=%" PRIu64
+               " force_key_units=%" PRIu64 " force_key_failures=%" PRIu64
                " failures=%" PRIu64 "\n",
                s->stops, s->frames, s->cached_frames,
                s->dirty_static_frames, s->dirty_partial_frames,
                s->dirty_full_frames, s->dirty_global_frames,
-               s->roi_frames, s->rtp_bytes, s->bitrate_changes, s->failures);
+               s->roi_frames, s->rtp_bytes, s->bitrate_changes,
+               s->force_key_unit_requests, s->force_key_unit_failures,
+               s->failures);
 }
 
 static void streamd_apply_no_scanout(GVTStreamd *s,

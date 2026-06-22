@@ -64,6 +64,9 @@ DIRTY_DYNAMIC_MIN_PPM=50000
 DIRTY_DYNAMIC_RECT_PPM=80000
 DIRTY_DYNAMIC_GLOBAL_FRAMES=18
 DIRTY_DYNAMIC_PARTIAL_FRAMES=1
+# Ask gvt-streamd for a fresh keyframe when dynamic dirty changes enter global
+# mode. 0 disables this; the value is the minimum interval between requests.
+DYNAMIC_FORCE_KEY_UNIT_MS=1000
 DIRTY_ROI_PADDING=64
 # After a click/key/wheel input, keep full-frame mode briefly so stale ROI
 # decode/control latency cannot leave visible trails.

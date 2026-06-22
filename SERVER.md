@@ -358,6 +358,11 @@ Experimental low-bandwidth knobs:
   `GVT_STREAM_DIRTY_DYNAMIC_GLOBAL_FRAMES=18` protect video/window-animation
   scenes from visible partial-frame breakup by promoting the first sustained or
   visually large partial candidate to full-frame global mode for a short window.
+- `GVT_STREAMD_DYNAMIC_FORCE_KEY_UNIT_MS=1000` asks `gvt-streamd` to request a
+  keyframe when the dirty stream enters global/full mode from static/partial
+  mode. This follows the same practical recovery idea as Sunshine/Moonlight IDR
+  requests without turning every dynamic frame into an IDR frame. Set it to `0`
+  to disable the request.
 - `GVT_STREAM_DIRTY_ROI_PADDING=64` expands partial rectangles before ROI
   encoding so small text/counter updates are not encoded right on the visible
   patch boundary.
