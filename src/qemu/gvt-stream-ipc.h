@@ -26,6 +26,7 @@
 #define GVT_STREAM_IPC_FLAG_DIRTY_GLOBAL        (1u << 5)
 #define GVT_STREAM_IPC_FLAG_LOW_BANDWIDTH       (1u << 6)
 #define GVT_STREAM_IPC_FLAG_ENCODE_ROI          (1u << 7)
+#define GVT_STREAM_IPC_FLAG_CPU_ROI             (1u << 8)
 
 typedef enum GVTStreamIpcType {
     GVT_STREAM_IPC_START = 1,

@@ -44,8 +44,14 @@ LOW_BANDWIDTH_ROI=0
 DIRTY_BLOCK_SIZE=16
 DIRTY_PIXEL_DELTA=8
 DIRTY_PARTIAL_MAX_PPM=150000
+# Sparse changes spread across a large bounding rect are sent as full frames to
+# avoid stale ROI patches leaving visible trails.
+DIRTY_PARTIAL_RECT_MAX_PPM=180000
 DIRTY_GLOBAL_MIN_PPM=350000
 DIRTY_GLOBAL_BURST_FRAMES=2
+# After a click/key/wheel input, keep full-frame mode briefly so stale ROI
+# decode/control latency cannot leave visible trails.
+INPUT_REFRESH_FRAMES=30
 
 ENCODE_FPS=59
 ENCODE_BITRATE=18000

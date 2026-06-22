@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -64,6 +65,7 @@ typedef struct GVTStreamd {
     int64_t last_wall_ms;
     int pipeline_width;
     int pipeline_height;
+    bool pipeline_dmabuf;
     uint32_t current_bitrate;
 
     int last_fd;
@@ -294,13 +296,14 @@ static void streamd_encoder_finish(GVTStreamd *s)
     s->pipeline = NULL;
     s->pipeline_width = 0;
     s->pipeline_height = 0;
+    s->pipeline_dmabuf = false;
     s->current_bitrate = 0;
     s->pts = 0;
     s->last_wall_ms = 0;
 }
 
 static bool streamd_encoder_start(GVTStreamd *s, uint32_t width,
-                                  uint32_t height)
+                                  uint32_t height, bool use_dmabuf)
 {
     g_autoptr(GError) error = NULL;
     g_autofree char *pipeline_desc = NULL;
@@ -314,18 +317,23 @@ static bool streamd_encoder_start(GVTStreamd *s, uint32_t width,
         "max-bframes=0 refs=1 cabac=false aud=true ";
     const char *parser = encode_h265 ? "h265parse" : "h264parse";
     const char *payloader = encode_h265 ? "rtph265pay" : "rtph264pay";
+    bool dmabuf_caps = use_dmabuf &&
+        !!(s->flags & GVT_STREAM_IPC_FLAG_DMABUF_CAPS_FEATURE);
 
     if (!s->started || !s->host[0] || !s->rtp_port) {
         return false;
     }
     if (s->pipeline &&
         s->pipeline_width == (int)width &&
-        s->pipeline_height == (int)height) {
+        s->pipeline_height == (int)height &&
+        s->pipeline_dmabuf == dmabuf_caps) {
         return true;
     }
     if (s->pipeline) {
-        g_printerr("gvt-streamd: encode-restart old_size=%dx%d new_size=%ux%u\n",
-                   s->pipeline_width, s->pipeline_height, width, height);
+        g_printerr("gvt-streamd: encode-restart old_size=%dx%d old_dmabuf=%d "
+                   "new_size=%ux%u new_dmabuf=%d\n",
+                   s->pipeline_width, s->pipeline_height,
+                   s->pipeline_dmabuf, width, height, dmabuf_caps);
         streamd_encoder_finish(s);
     }
 
@@ -400,7 +408,7 @@ static bool streamd_encoder_start(GVTStreamd *s, uint32_t width,
                                "framerate", GST_TYPE_FRACTION,
                                (int)s->fps, 1,
                                NULL);
-    if (s->flags & GVT_STREAM_IPC_FLAG_DMABUF_CAPS_FEATURE) {
+    if (dmabuf_caps) {
         gst_caps_set_features(caps, 0,
                               gst_caps_features_new("memory:DMABuf", NULL));
     }
@@ -429,6 +437,7 @@ static bool streamd_encoder_start(GVTStreamd *s, uint32_t width,
 
     s->pipeline_width = (int)width;
     s->pipeline_height = (int)height;
+    s->pipeline_dmabuf = dmabuf_caps;
     s->current_bitrate = s->bitrate;
     g_printerr("gvt-streamd: encode-start codec=%s rtp=%s:%u size=%ux%u "
                "fps=%u rate_control=%s bitrate=%u keyint=%u mtu=%u fec=%u/%u "
@@ -436,8 +445,7 @@ static bool streamd_encoder_start(GVTStreamd *s, uint32_t width,
                streamd_codec(s), s->host, s->rtp_port, width, height,
                s->fps, streamd_rate_control(s), s->bitrate, s->keyint,
                s->mtu, s->rtp_fec, s->rtp_fec_important,
-               !!(s->flags & GVT_STREAM_IPC_FLAG_DMABUF_CAPS_FEATURE),
-               s->roi_enabled);
+               dmabuf_caps, s->roi_enabled);
     return true;
 }
 
@@ -637,6 +645,70 @@ static StreamdFrameRect streamd_select_frame_rect(GVTStreamd *s,
     return rect;
 }
 
+static GstBuffer *streamd_copy_cpu_roi_buffer(GVTStreamd *s,
+                                              const GVTStreamIpcMessage *msg,
+                                              int fd,
+                                              const StreamdFrameRect *rect)
+{
+    GstBuffer *buf = NULL;
+    GstMapInfo out_map;
+    void *mapped;
+    const uint8_t *src;
+    size_t map_size;
+    size_t copy_stride;
+    size_t copy_size;
+    gsize plane_offsets[GST_VIDEO_MAX_PLANES] = { 0 };
+    gint plane_strides[GST_VIDEO_MAX_PLANES] = { 0 };
+    uint32_t row;
+
+    if (!s || !msg || fd < 0 || !rect || !rect->roi ||
+        !rect->w || !rect->h || !msg->stride) {
+        return NULL;
+    }
+
+    map_size = (size_t)msg->offset + (size_t)msg->stride * rect->h;
+    copy_stride = (size_t)rect->w * 4u;
+    copy_size = copy_stride * rect->h;
+    mapped = mmap(NULL, map_size, PROT_READ, MAP_SHARED, fd, 0);
+    if (mapped == MAP_FAILED) {
+        s->failures++;
+        g_printerr("gvt-streamd: cpu-roi-mmap-failed rect=%u,%u %ux%u "
+                   "size=%zu error=%s\n",
+                   rect->x, rect->y, rect->w, rect->h, map_size,
+                   strerror(errno));
+        return NULL;
+    }
+
+    buf = gst_buffer_new_allocate(NULL, copy_size, NULL);
+    if (!buf || !gst_buffer_map(buf, &out_map, GST_MAP_WRITE)) {
+        s->failures++;
+        g_printerr("gvt-streamd: cpu-roi-alloc-failed rect=%u,%u %ux%u "
+                   "copy_size=%zu\n",
+                   rect->x, rect->y, rect->w, rect->h, copy_size);
+        if (buf) {
+            gst_buffer_unref(buf);
+        }
+        munmap(mapped, map_size);
+        return NULL;
+    }
+
+    src = (const uint8_t *)mapped + msg->offset;
+    for (row = 0; row < rect->h; row++) {
+        memcpy(out_map.data + (size_t)row * copy_stride,
+               src + (size_t)row * msg->stride,
+               copy_stride);
+    }
+    gst_buffer_unmap(buf, &out_map);
+    munmap(mapped, map_size);
+
+    plane_strides[0] = (gint)copy_stride;
+    gst_buffer_add_video_meta_full(buf, GST_VIDEO_FRAME_FLAG_NONE,
+                                   GST_VIDEO_FORMAT_BGRx,
+                                   rect->w, rect->h, 1,
+                                   plane_offsets, plane_strides);
+    return buf;
+}
+
 static bool streamd_push_dmabuf(GVTStreamd *s,
                                 const GVTStreamIpcMessage *msg,
                                 int fd,
@@ -644,10 +716,14 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
 {
     GstBuffer *buf;
     GstMemory *mem;
+    GstMemory *full_mem;
     GstFlowReturn flow;
     gsize plane_offsets[GST_VIDEO_MAX_PLANES] = { 0 };
     gint plane_strides[GST_VIDEO_MAX_PLANES] = { 0 };
     StreamdFrameRect rect;
+    const char *memory = "dmabuf";
+    gsize plane_offset;
+    gsize visible_size;
     size_t size;
 
     if (!msg || !msg->width || !msg->height ||
@@ -685,52 +761,89 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
             return false;
         }
     } else {
-        streamd_cache_last_frame(s, msg, fd);
-    }
-
-    rect = streamd_select_frame_rect(s, msg);
-    if (!streamd_encoder_start(s, rect.w, rect.h)) {
-        close(fd);
-        return false;
-    }
-    streamd_apply_frame_policy(s, msg);
-    if (!s->dmabuf_allocator) {
-        s->dmabuf_allocator = gst_dmabuf_allocator_new();
-        if (!s->dmabuf_allocator) {
-            s->failures++;
-            close(fd);
-            g_printerr("gvt-streamd: dmabuf-allocator-create-failed\n");
-            return false;
+        if (!(msg->flags & GVT_STREAM_IPC_FLAG_CPU_ROI)) {
+            streamd_cache_last_frame(s, msg, fd);
         }
     }
 
-    size = (size_t)msg->offset + (size_t)msg->stride * msg->height;
-    mem = gst_dmabuf_allocator_alloc(s->dmabuf_allocator, fd, size);
-    if (!mem) {
-        s->failures++;
+    rect = streamd_select_frame_rect(s, msg);
+    buf = NULL;
+    if ((msg->flags & GVT_STREAM_IPC_FLAG_CPU_ROI) && rect.roi) {
+        buf = streamd_copy_cpu_roi_buffer(s, msg, fd, &rect);
         close(fd);
-        g_printerr("gvt-streamd: dmabuf-memory-alloc-failed size=%zu\n",
-                   size);
-        return false;
+        fd = -1;
+        if (!buf) {
+            return false;
+        }
+        memory = "system";
+        if (!streamd_encoder_start(s, rect.w, rect.h, false)) {
+            gst_buffer_unref(buf);
+            return false;
+        }
+    }
+    if (!buf) {
+        if (!streamd_encoder_start(s, rect.w, rect.h, true)) {
+            close(fd);
+            return false;
+        }
+        if (!s->dmabuf_allocator) {
+            s->dmabuf_allocator = gst_dmabuf_allocator_new();
+            if (!s->dmabuf_allocator) {
+                s->failures++;
+                close(fd);
+                g_printerr("gvt-streamd: dmabuf-allocator-create-failed\n");
+                return false;
+            }
+        }
+
+        size = (size_t)msg->offset + (size_t)msg->stride * msg->height;
+        full_mem = gst_dmabuf_allocator_alloc(s->dmabuf_allocator, fd, size);
+        if (!full_mem) {
+            s->failures++;
+            close(fd);
+            g_printerr("gvt-streamd: dmabuf-memory-alloc-failed size=%zu\n",
+                       size);
+            return false;
+        }
+
+        plane_offset = (gsize)msg->offset +
+            (gsize)rect.y * msg->stride + (gsize)rect.x * 4;
+        mem = full_mem;
+        if (rect.roi && plane_offset) {
+            visible_size = (gsize)(rect.h - 1) * msg->stride +
+                (gsize)rect.w * 4;
+            mem = gst_memory_share(full_mem, plane_offset, visible_size);
+            gst_memory_unref(full_mem);
+            if (!mem) {
+                s->failures++;
+                g_printerr("gvt-streamd: dmabuf-share-failed rect=%u,%u %ux%u "
+                           "offset=%" G_GSIZE_FORMAT " visible=%" G_GSIZE_FORMAT "\n",
+                           rect.x, rect.y, rect.w, rect.h,
+                           plane_offset, visible_size);
+                return false;
+            }
+            plane_offsets[0] = 0;
+        } else {
+            plane_offsets[0] = plane_offset;
+        }
+        buf = gst_buffer_new();
+        gst_buffer_append_memory(buf, mem);
+        plane_strides[0] = msg->stride;
+        gst_buffer_add_video_meta_full(buf, GST_VIDEO_FRAME_FLAG_NONE,
+                                       GST_VIDEO_FORMAT_BGRx,
+                                       rect.w, rect.h, 1,
+                                       plane_offsets, plane_strides);
     }
 
-    buf = gst_buffer_new();
-    gst_buffer_append_memory(buf, mem);
-    plane_offsets[0] = (gsize)msg->offset +
-        (gsize)rect.y * msg->stride + (gsize)rect.x * 4;
-    plane_strides[0] = msg->stride;
-    gst_buffer_add_video_meta_full(buf, GST_VIDEO_FRAME_FLAG_NONE,
-                                   GST_VIDEO_FORMAT_BGRx,
-                                   rect.w, rect.h, 1,
-                                   plane_offsets, plane_strides);
+    streamd_apply_frame_policy(s, msg);
     streamd_stamp_buffer(s, buf);
 
     flow = gst_app_src_push_buffer(GST_APP_SRC(s->appsrc), buf);
     streamd_poll_bus(s);
     if (flow != GST_FLOW_OK) {
         s->failures++;
-        g_printerr("gvt-streamd: dmabuf-push-failed source=%s flow=%s\n",
-                   source ?: "unknown", gst_flow_get_name(flow));
+        g_printerr("gvt-streamd: frame-push-failed source=%s mem=%s flow=%s\n",
+                   source ?: "unknown", memory, gst_flow_get_name(flow));
         return false;
     }
 
@@ -742,13 +855,13 @@ static bool streamd_push_dmabuf(GVTStreamd *s,
         s->cached_frames++;
     }
     if (s->frames <= 5 || s->frames % 60 == 0) {
-        g_printerr("gvt-streamd: dmabuf-push-ok #=%" PRIu64
-                   " source=%s size=%ux%u stride=%u cached=%" PRIu64
+        g_printerr("gvt-streamd: frame-push-ok #=%" PRIu64
+                   " source=%s mem=%s size=%ux%u stride=%u cached=%" PRIu64
                    " encode_rect=%u,%u %ux%u roi=%d "
                    " dirty=%s rect=%u,%u %ux%u ppm=%u bitrate=%u "
                    "rtp_bytes=%" PRIu64 " failures=%" PRIu64 "\n",
-                   s->frames, source ?: "live", msg->width, msg->height,
-                   msg->stride, s->cached_frames,
+                   s->frames, source ?: "live", memory, msg->width,
+                   msg->height, msg->stride, s->cached_frames,
                    rect.x, rect.y, rect.w, rect.h, rect.roi,
                    streamd_dirty_mode_name(msg->dirty_mode),
                    msg->dirty_x, msg->dirty_y, msg->dirty_w, msg->dirty_h,
