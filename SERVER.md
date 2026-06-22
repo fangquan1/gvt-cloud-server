@@ -329,11 +329,17 @@ for it. Useful runtime knobs:
 
 Experimental low-bandwidth knobs:
 
-- `GVT_STREAM_LOW_BANDWIDTH=1` enables per-frame EGL readback and dirty-region
-  classification in QEMU.
+- `GVT_STREAM_LOW_BANDWIDTH=1` enables dirty-region classification in QEMU.
+  By default `GVT_STREAM_DIRTY_GPU_SAMPLE=1` uses the GPU to scale the scanout
+  down to a small block-sample surface, then reads back only that small image.
+- `GVT_STREAM_DIRTY_CPU_READBACK=1` restores the older full-frame CPU readback
+  detector for diagnostics. Do not use it as the normal audio-playback path.
 - `GVT_STREAM_LOW_BANDWIDTH_ROI=1` makes `gvt-streamd` encode only the dirty
   rectangle for partial frames. This produces a small H.265 picture and requires
   the client ROI compositor path to be enabled.
+- `GVT_STREAM_DIRTY_GPU_SAMPLE_BLOCK_SIZE=8` controls the GPU sample grid size.
+- `GVT_STREAM_DIRTY_GPU_SAMPLE_PIXEL_DELTA=2` is the sampled-pixel noise
+  threshold.
 - `GVT_STREAM_DIRTY_BLOCK_SIZE=16` controls the diff grid size.
 - `GVT_STREAM_DIRTY_PIXEL_DELTA=8` is the per-channel noise threshold.
 - `GVT_STREAM_DIRTY_PARTIAL_MAX_PPM=150000` marks small changes as partial

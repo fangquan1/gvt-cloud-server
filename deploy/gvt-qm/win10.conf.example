@@ -33,10 +33,10 @@ IDLE_CAPTURE_MS=17
 IDLE_AFTER_MS=0
 IDLE_PROBE_MS=0
 
-# Experimental low-bandwidth path. CPU dirty readback can disturb SPICE/HDA
-# audio because it synchronously reads the display back in the QEMU process.
-# Keep disabled for normal use; prefer a future GPU dirty detector for this
-# path instead of enabling CPU readback during audio playback.
+# Experimental low-bandwidth path. The normal dirty detector uses GPU scaling to
+# create a small block-sample surface and reads back only that metadata-sized
+# image. CPU dirty readback is kept as a manual diagnostics switch because it can
+# disturb SPICE/HDA audio when run every frame in the QEMU process.
 LOW_BANDWIDTH=0
 # ROI mode encodes only the dirty rect for partial frames. It requires a
 # client-side compositor and will not render correctly in the current plain RTP
@@ -45,6 +45,9 @@ LOW_BANDWIDTH_ROI=0
 # Must be explicitly enabled before LOW_BANDWIDTH performs CPU frame readback.
 # This is an experiment switch, not a production default.
 DIRTY_CPU_READBACK=0
+DIRTY_GPU_SAMPLE=1
+DIRTY_GPU_SAMPLE_BLOCK_SIZE=8
+DIRTY_GPU_SAMPLE_PIXEL_DELTA=2
 DIRTY_BLOCK_SIZE=16
 DIRTY_PIXEL_DELTA=8
 DIRTY_PARTIAL_MAX_PPM=150000
