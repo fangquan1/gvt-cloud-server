@@ -2292,7 +2292,7 @@ static void gvt_stream_dirty_apply_change(GVTStreamDisplay *gdpy,
     } else {
         gdpy->dirty_partial_streak = 0;
     }
-    dynamic_candidate = gdpy->low_bandwidth_roi && partial_candidate &&
+    dynamic_candidate = gdpy->low_bandwidth && partial_candidate &&
         ((gdpy->dirty_dynamic_min_ppm &&
           diff_ppm >= gdpy->dirty_dynamic_min_ppm) ||
          (gdpy->dirty_dynamic_rect_ppm &&
