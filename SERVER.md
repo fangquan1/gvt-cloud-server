@@ -334,7 +334,11 @@ Experimental low-bandwidth knobs:
   down to a small block-sample surface, then reads back only that small image.
 - `GVT_STREAM_DIRTY_CPU_READBACK=1` restores the older full-frame CPU readback
   detector for diagnostics. Do not use it as the normal audio-playback path.
-- `GVT_STREAM_LOW_BANDWIDTH_ROI=1` makes `gvt-streamd` encode only the dirty
+- `GVT_STREAM_LOW_BANDWIDTH_ROI=1` requests the experimental ROI path, but QEMU
+  still keeps partial frames full-size unless `GVT_STREAM_ROI_PATCH_VIDEO=1` is
+  also set. This keeps the normal low-bandwidth path compatible with the plain
+  RTP viewer and avoids visible patch seams during stopwatch/video motion.
+- `GVT_STREAM_ROI_PATCH_VIDEO=1` makes `gvt-streamd` encode only the dirty
   rectangle for partial frames. This produces a small H.265 picture and requires
   the client ROI compositor path to be enabled.
 - `GVT_STREAM_DIRTY_GPU_SAMPLE_BLOCK_SIZE=8` controls the GPU sample grid size.
@@ -365,18 +369,23 @@ With `GVT_STREAM_LOW_BANDWIDTH_ROI=0`, low-bandwidth behavior is compatible with
 the existing RTP viewer: static frames are not re-submitted after the first full
 frame, partial candidates are encoded as full-size H.265 pictures at reduced
 VAAPI bitrate, and global changes switch back to full bitrate immediately.
-With `GVT_STREAM_LOW_BANDWIDTH_ROI=1`, partial candidates are encoded as
+This is the recommended mode for normal testing. It follows the same practical
+shape as Sunshine/Moonlight-style video streaming: keep the encoded video
+timeline full-frame, and use damage primarily for skip/rate decisions rather
+than sending sub-frame pictures to the player.
+
+With both `GVT_STREAM_LOW_BANDWIDTH_ROI=1` and
+`GVT_STREAM_ROI_PATCH_VIDEO=1`, partial candidates are encoded as
 dirty-rectangle-sized H.265 pictures by pointing `GstVideoMeta` at the subregion
-inside the source DMABUF. QEMU also sends per-frame ROI metadata over the active
-control TCP connection, for example `type=frame`, `mode=partial|global|full`,
-`x/y/w/h`, source `width/height`, `dirty_ppm`, and `background` sequence. The
-client can use that metadata to composite dirty-rectangle pictures over its
-cached full-frame background. Leave ROI disabled unless the matching client
-compositor is enabled for the experiment. ROI mode is intentionally limited to
-small, sparse changes; video playback and window animations should promote to
-global/full-frame mode because Sunshine-style streaming keeps a full-frame video
-timeline and uses damage mostly to skip redundant frames, while ROI video
-patching can expose visible seams.
+inside the source DMABUF or by passing a copied CPU ROI buffer. QEMU also sends
+per-frame ROI metadata over the active control TCP connection, for example
+`type=frame`, `mode=partial|global|full`, `x/y/w/h`, source `width/height`,
+`dirty_ppm`, and `background` sequence. The client can use that metadata to
+composite dirty-rectangle pictures over its cached full-frame background. Leave
+ROI patch video disabled unless the matching client compositor is enabled for
+the experiment. ROI patch mode is intentionally limited to small, sparse
+changes; video playback and window animations should promote to global/full
+frame mode because sub-frame H.265 pictures can expose visible seams.
 
 When the client disconnects, the active control connection closes and QEMU
 asks `gvt-streamd` to stop encoding. When the guest display sleeps or scanout

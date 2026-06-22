@@ -97,7 +97,9 @@ typedef struct GVTStreamDisplay {
     bool idle_sample_valid;
     uint32_t idle_sample[GVT_STREAM_IDLE_SAMPLE_N];
     bool low_bandwidth;
+    bool low_bandwidth_roi_requested;
     bool low_bandwidth_roi;
+    bool roi_patch_video;
     bool dirty_cpu_readback;
     bool dirty_gpu_sample;
     bool dirty_valid;
@@ -3436,8 +3438,12 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         gdpy->import_test = gvt_stream_getenv_bool("GVT_STREAM_IMPORT_TEST", false);
         gdpy->low_bandwidth =
             gvt_stream_getenv_bool("GVT_STREAM_LOW_BANDWIDTH", false);
-        gdpy->low_bandwidth_roi =
+        gdpy->low_bandwidth_roi_requested =
             gvt_stream_getenv_bool("GVT_STREAM_LOW_BANDWIDTH_ROI", false);
+        gdpy->roi_patch_video =
+            gvt_stream_getenv_bool("GVT_STREAM_ROI_PATCH_VIDEO", false);
+        gdpy->low_bandwidth_roi =
+            gdpy->low_bandwidth_roi_requested && gdpy->roi_patch_video;
         gdpy->dirty_cpu_readback =
             gvt_stream_getenv_bool("GVT_STREAM_DIRTY_CPU_READBACK", false);
         gdpy->dirty_gpu_sample =
@@ -3454,6 +3460,12 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         }
         if (!gdpy->low_bandwidth) {
             gdpy->low_bandwidth_roi = false;
+        }
+        if (gdpy->low_bandwidth_roi_requested && !gdpy->low_bandwidth_roi) {
+            warn_report("gvt-stream: LOW_BANDWIDTH_ROI requested but "
+                        "GVT_STREAM_ROI_PATCH_VIDEO is not enabled; keeping "
+                        "partial frames full-size to avoid ROI patch seams in "
+                        "the plain RTP viewer");
         }
         {
             const char *socket_path = g_getenv("GVT_STREAMD_SOCKET");
@@ -3645,6 +3657,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         error_report("gvt-stream: listener console=%d refresh_ms=%" PRIu64
                      " report_ms=%" PRIu64 " verbose=%d import_test=%d "
                      "low_bandwidth=%d low_bandwidth_roi=%d "
+                     "low_bandwidth_roi_requested=%d roi_patch_video=%d "
                      "dirty_cpu_readback=%d dirty_gpu_sample=%d "
                      "dirty_block=%u dirty_delta=%" PRIu64
                      " dirty_gpu_sample_block=%u"
@@ -3671,6 +3684,8 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      qemu_console_get_index(con), gdpy->refresh_ms,
                      gdpy->report_ms, gdpy->verbose, gdpy->import_test,
                      gdpy->low_bandwidth, gdpy->low_bandwidth_roi,
+                     gdpy->low_bandwidth_roi_requested,
+                     gdpy->roi_patch_video,
                      gdpy->dirty_cpu_readback, gdpy->dirty_gpu_sample,
                      gdpy->dirty_block_size,
                      gdpy->dirty_pixel_delta,

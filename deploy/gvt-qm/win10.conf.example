@@ -38,10 +38,12 @@ IDLE_PROBE_MS=0
 # image. CPU dirty readback is kept as a manual diagnostics switch because it can
 # disturb SPICE/HDA audio when run every frame in the QEMU process.
 LOW_BANDWIDTH=0
-# ROI mode encodes only the dirty rect for partial frames. It requires a
-# client-side compositor and will not render correctly in the current plain RTP
-# viewer, so keep disabled unless testing the ROI path directly.
+# Low-bandwidth mode keeps partial frames full-size by default. This matches the
+# plain RTP viewer and avoids visible patch seams during stopwatch/video motion.
 LOW_BANDWIDTH_ROI=0
+# Experimental ROI patch video encodes dirty-rect-sized H.265 pictures. It
+# requires a matching compositor and can corrupt the plain viewer if enabled.
+ROI_PATCH_VIDEO=0
 # Must be explicitly enabled before LOW_BANDWIDTH performs CPU frame readback.
 # This is an experiment switch, not a production default.
 DIRTY_CPU_READBACK=0
