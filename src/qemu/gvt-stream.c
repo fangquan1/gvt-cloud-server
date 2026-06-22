@@ -93,6 +93,7 @@ typedef struct GVTStreamDisplay {
     uint32_t idle_sample[GVT_STREAM_IDLE_SAMPLE_N];
     bool low_bandwidth;
     bool low_bandwidth_roi;
+    bool dirty_cpu_readback;
     bool dirty_valid;
     bool dirty_prev_valid;
     uint8_t *dirty_prev;
@@ -3047,6 +3048,19 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
             gvt_stream_getenv_bool("GVT_STREAM_LOW_BANDWIDTH", false);
         gdpy->low_bandwidth_roi =
             gvt_stream_getenv_bool("GVT_STREAM_LOW_BANDWIDTH_ROI", false);
+        gdpy->dirty_cpu_readback =
+            gvt_stream_getenv_bool("GVT_STREAM_DIRTY_CPU_READBACK", false);
+        if (gdpy->low_bandwidth && !gdpy->dirty_cpu_readback) {
+            warn_report("gvt-stream: LOW_BANDWIDTH requested but CPU dirty "
+                        "readback is disabled; falling back to full-frame "
+                        "streaming. Set GVT_STREAM_DIRTY_CPU_READBACK=1 only "
+                        "for explicit low-bandwidth experiments.");
+            gdpy->low_bandwidth = false;
+            gdpy->low_bandwidth_roi = false;
+        }
+        if (!gdpy->low_bandwidth) {
+            gdpy->low_bandwidth_roi = false;
+        }
         {
             const char *socket_path = g_getenv("GVT_STREAMD_SOCKET");
 
@@ -3211,6 +3225,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
         error_report("gvt-stream: listener console=%d refresh_ms=%" PRIu64
                      " report_ms=%" PRIu64 " verbose=%d import_test=%d "
                      "low_bandwidth=%d low_bandwidth_roi=%d "
+                     "dirty_cpu_readback=%d "
                      "dirty_block=%u dirty_delta=%" PRIu64
                      " dirty_partial_ppm=%" PRIu64
                      " dirty_partial_rect_ppm=%" PRIu64
@@ -3229,6 +3244,7 @@ static void gvt_stream_init(DisplayState *ds, DisplayOptions *opts)
                      qemu_console_get_index(con), gdpy->refresh_ms,
                      gdpy->report_ms, gdpy->verbose, gdpy->import_test,
                      gdpy->low_bandwidth, gdpy->low_bandwidth_roi,
+                     gdpy->dirty_cpu_readback,
                      gdpy->dirty_block_size,
                      gdpy->dirty_pixel_delta,
                      gdpy->dirty_partial_max_ppm,
