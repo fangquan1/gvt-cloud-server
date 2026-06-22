@@ -59,11 +59,11 @@ DIRTY_PARTIAL_RECT_MAX_PPM=180000
 DIRTY_GLOBAL_MIN_PPM=350000
 DIRTY_GLOBAL_BURST_FRAMES=2
 # ROI is only for visually small changes. Dynamic/video-like changes are
-# promoted to full-frame for a short window to avoid visible ROI patch seams.
+# promoted to full-frame for a short window to avoid visible partial breakup.
 DIRTY_DYNAMIC_MIN_PPM=50000
 DIRTY_DYNAMIC_RECT_PPM=80000
 DIRTY_DYNAMIC_GLOBAL_FRAMES=18
-DIRTY_DYNAMIC_PARTIAL_FRAMES=2
+DIRTY_DYNAMIC_PARTIAL_FRAMES=1
 DIRTY_ROI_PADDING=64
 # After a click/key/wheel input, keep full-frame mode briefly so stale ROI
 # decode/control latency cannot leave visible trails.

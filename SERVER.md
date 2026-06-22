@@ -354,10 +354,10 @@ Experimental low-bandwidth knobs:
   after a large change.
 - `GVT_STREAM_DIRTY_DYNAMIC_MIN_PPM=50000`,
   `GVT_STREAM_DIRTY_DYNAMIC_RECT_PPM=80000`,
-  `GVT_STREAM_DIRTY_DYNAMIC_PARTIAL_FRAMES=2`, and
+  `GVT_STREAM_DIRTY_DYNAMIC_PARTIAL_FRAMES=1`, and
   `GVT_STREAM_DIRTY_DYNAMIC_GLOBAL_FRAMES=18` protect video/window-animation
-  scenes from visible partial-frame breakup by promoting sustained or visually
-  large partial candidates to full-frame global mode for a short window.
+  scenes from visible partial-frame breakup by promoting the first sustained or
+  visually large partial candidate to full-frame global mode for a short window.
 - `GVT_STREAM_DIRTY_ROI_PADDING=64` expands partial rectangles before ROI
   encoding so small text/counter updates are not encoded right on the visible
   patch boundary.
